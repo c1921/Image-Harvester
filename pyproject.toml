@@ -20,7 +20,6 @@ tui = ["textual>=0.58,<1.0"]
 dev = ["pytest>=8.0.0"]
 
 [project.scripts]
-harvester = "image_harvester.cli:main"
 harvester-tui = "image_harvester.tui.app:main"
 
 [tool.setuptools]
