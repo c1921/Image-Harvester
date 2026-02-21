@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image-harvester"
+version = "2.0.0"
+description = "基于模板的图片采集器，支持断点续跑与元数据导出。"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "beautifulsoup4>=4.12.0",
+  "PyYAML>=6.0",
+  "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+playwright = ["playwright>=1.50.0"]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+harvester = "image_harvester.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
