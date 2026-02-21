@@ -320,7 +320,7 @@ class ImageHarvesterPipeline:
             job_id,
             "sequence_expand_enabled",
             (
-                f"页面 {page_num} 启用序号扩展: "
+                f"页面 {page_num} "
                 f"上限={sequence_upper_bound}, 计划下载={len(tuples)}"
             ),
             page_id=page_state.id,
