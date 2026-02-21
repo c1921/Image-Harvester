@@ -2,7 +2,7 @@
 
 Image Harvester v2 是一个基于 URL 模板的图片下载工具，提供：
 
-- 按页面 DOM 顺序下载图片
+- 基于页面已解析图片路径进行序号扩展下载（不回退到仅下载页面展示的少量图片）
 - 使用 SQLite 记录状态，支持中断后续跑
 - 每页生成独立元数据文件（`metadata.json`）
 - CLI 命令：`run`、`status`、`retry-failed`、`export-metadata`

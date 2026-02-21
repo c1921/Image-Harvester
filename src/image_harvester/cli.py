@@ -117,23 +117,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_parser.set_defaults(playwright_fallback=None)
     run_parser.add_argument(
-        "--sequence-expand",
-        dest="sequence_expand_enabled",
-        action="store_true",
-        help="启用基于编号规律的序号扩展下载（默认启用）。",
-    )
-    run_parser.add_argument(
-        "--no-sequence-expand",
-        dest="sequence_expand_enabled",
-        action="store_false",
-        help="禁用基于编号规律的序号扩展下载。",
-    )
-    run_parser.set_defaults(sequence_expand_enabled=None)
-    run_parser.add_argument(
         "--sequence-count-selector",
         dest="sequence_count_selector",
         default=None,
-        help="图集总张数选择器（默认: #tishi p span）。",
+        help="图集总张数选择器（用于序号扩展，默认: #tishi p span）。",
     )
     run_parser.add_argument(
         "--sequence-require-upper-bound",
@@ -346,7 +333,6 @@ def _merge_run_settings(args: argparse.Namespace, yaml_data: dict[str, Any]) -> 
         "request_delay_sec",
         "stop_after_consecutive_page_failures",
         "playwright_fallback",
-        "sequence_expand_enabled",
         "sequence_count_selector",
         "sequence_require_upper_bound",
     ]

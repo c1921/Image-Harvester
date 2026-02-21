@@ -28,7 +28,6 @@ def test_form_builds_valid_run_config() -> None:
     assert config.start_num == 1
     assert config.end_num is None
     assert config.engine == "requests"
-    assert config.sequence_expand_enabled is True
     assert config.sequence_count_selector == "#tishi p span"
 
 
@@ -68,4 +67,4 @@ def test_payload_from_run_config_uses_form_shape() -> None:
     assert payload["start_num"] == "2"
     assert payload["end_num"] == ""
     assert payload["engine"] == "requests"
-    assert payload["sequence_expand_enabled"] is True
+    assert payload["sequence_count_selector"] == "#tishi p span"

@@ -32,7 +32,6 @@ class RunConfig:
     request_delay_sec: float = 0.2
     stop_after_consecutive_page_failures: int = 5
     playwright_fallback: bool = False
-    sequence_expand_enabled: bool = True
     sequence_count_selector: str = "#tishi p span"
     sequence_require_upper_bound: bool = True
 
@@ -43,7 +42,6 @@ class RunConfig:
             "selector": self.selector,
             "output_dir": str(self.output_dir),
             "engine": self.engine,
-            "sequence_expand_enabled": self.sequence_expand_enabled,
             "sequence_count_selector": self.sequence_count_selector,
             "sequence_require_upper_bound": self.sequence_require_upper_bound,
         }

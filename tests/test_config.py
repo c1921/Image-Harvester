@@ -21,8 +21,7 @@ def test_build_run_config_validates_range_boundary() -> None:
         )
 
 
-def test_build_run_config_enables_sequence_expand_by_default() -> None:
+def test_build_run_config_sets_sequence_defaults() -> None:
     config = build_run_config({"url_template": "https://x/{num}", "start_num": 1})
-    assert config.sequence_expand_enabled is True
     assert config.sequence_count_selector == "#tishi p span"
     assert config.sequence_require_upper_bound is True

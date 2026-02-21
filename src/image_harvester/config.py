@@ -45,7 +45,6 @@ def build_run_config(raw: dict[str, Any]) -> RunConfig:
             raw.get("stop_after_consecutive_page_failures", 5)
         ),
         playwright_fallback=bool(raw.get("playwright_fallback", False)),
-        sequence_expand_enabled=bool(raw.get("sequence_expand_enabled", True)),
         sequence_count_selector=str(raw.get("sequence_count_selector", "#tishi p span")),
         sequence_require_upper_bound=bool(raw.get("sequence_require_upper_bound", True)),
     )
@@ -71,7 +70,7 @@ def validate_run_config(config: RunConfig) -> None:
         raise ValueError("stop_after_consecutive_page_failures 必须 >= 1")
     if not config.selector.strip():
         raise ValueError("selector 不能为空。")
-    if config.sequence_expand_enabled and not config.sequence_count_selector.strip():
+    if not config.sequence_count_selector.strip():
         raise ValueError("sequence_count_selector 不能为空。")
 
 
@@ -100,7 +99,6 @@ def run_config_json(config: RunConfig) -> str:
         "request_delay_sec": config.request_delay_sec,
         "stop_after_consecutive_page_failures": config.stop_after_consecutive_page_failures,
         "playwright_fallback": config.playwright_fallback,
-        "sequence_expand_enabled": config.sequence_expand_enabled,
         "sequence_count_selector": config.sequence_count_selector,
         "sequence_require_upper_bound": config.sequence_require_upper_bound,
     }

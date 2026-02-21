@@ -267,61 +267,64 @@ class ImageHarvesterPipeline:
             return False
 
         page_dir = self.config.output_dir / page_dir_name(page_num, source_id)
-        sequence_upper_bound: int | None = None
-        sequence_probe_url: str | None = None
-        sequence_mode = False
-
-        if self.config.sequence_expand_enabled:
-            sequence_upper_bound = parse_gallery_upper_bound(
-                fetch_result.html,
-                self.config.sequence_count_selector,
+        sequence_upper_bound = parse_gallery_upper_bound(
+            fetch_result.html,
+            self.config.sequence_count_selector,
+        )
+        if sequence_upper_bound is None:
+            message = (
+                "序号扩展需要图集上限，但未解析到有效上限。"
+                f"选择器: {self.config.sequence_count_selector}"
             )
-            if sequence_upper_bound is None and self.config.sequence_require_upper_bound:
-                message = (
-                    "序号扩展已启用，但未解析到图集上限。"
-                    f"选择器: {self.config.sequence_count_selector}"
-                )
-                self.store.update_page(
-                    page_state.id,
-                    status="failed_fetch",
-                    image_count=0,
-                    error=message,
-                    finish=True,
-                )
-                self._write_page_metadata_by_id(job_id, page_state.id)
-                self.store.add_event(
-                    job_id,
-                    "sequence_upper_bound_missing",
-                    f"页面 {page_num} 失败: {message}",
-                    page_id=page_state.id,
-                )
-                return False
+            self.store.update_page(
+                page_state.id,
+                status="failed_fetch",
+                image_count=0,
+                error=message,
+                finish=True,
+            )
+            self._write_page_metadata_by_id(job_id, page_state.id)
+            self.store.add_event(
+                job_id,
+                "sequence_upper_bound_missing",
+                f"页面 {page_num} 失败: {message}",
+                page_id=page_state.id,
+            )
+            return False
 
-            tuples, sequence_probe_url, sequence_mode = self._build_sequence_tuples(
+        try:
+            tuples, sequence_probe_url = self._build_sequence_tuples(
                 parse_result.image_urls,
                 page_dir,
                 sequence_upper_bound,
             )
-            if sequence_mode:
-                assert sequence_upper_bound is not None
-                self.store.add_event(
-                    job_id,
-                    "sequence_expand_enabled",
-                    (
-                        f"页面 {page_num} 启用序号扩展: "
-                        f"上限={sequence_upper_bound}, 计划下载={len(tuples)}"
-                    ),
-                    page_id=page_state.id,
-                )
-            else:
-                self.store.add_event(
-                    job_id,
-                    "sequence_expand_fallback",
-                    f"页面 {page_num} 未命中序号规则，回退 DOM 链接模式。",
-                    page_id=page_state.id,
-                )
-        else:
-            tuples = self._tuples_from_image_urls(parse_result.image_urls, page_dir)
+        except ValueError as exc:
+            message = str(exc)
+            self.store.update_page(
+                page_state.id,
+                status="failed_fetch",
+                image_count=0,
+                error=message,
+                finish=True,
+            )
+            self._write_page_metadata_by_id(job_id, page_state.id)
+            self.store.add_event(
+                job_id,
+                "sequence_seed_missing",
+                f"页面 {page_num} 失败: {message}",
+                page_id=page_state.id,
+            )
+            return False
+
+        self.store.add_event(
+            job_id,
+            "sequence_expand_enabled",
+            (
+                f"页面 {page_num} 启用序号扩展: "
+                f"上限={sequence_upper_bound}, 计划下载={len(tuples)}"
+            ),
+            page_id=page_state.id,
+        )
 
         self.store.upsert_page_images(page_state.id, tuples)
         self.store.update_page(page_state.id, status="running", image_count=len(tuples))
@@ -401,12 +404,16 @@ class ImageHarvesterPipeline:
                     ),
                     page_id=page_state.id,
                 )
-                if sequence_mode and sequence_upper_bound is not None:
-                    if image.image_index <= sequence_upper_bound:
-                        sequence_incomplete = True
-                        break
+                sequence_incomplete = True
+                break
 
-        if sequence_incomplete and sequence_upper_bound is not None:
+        if not sequence_incomplete:
+            sequence_incomplete = any(
+                item.status == "failed" and item.image_index <= sequence_upper_bound
+                for item in self.store.get_page_images(page_state.id)
+            )
+
+        if sequence_incomplete:
             message = (
                 f"页面 {page_num} 未达到上限 {sequence_upper_bound} 即下载失败，"
                 "标记为失败并跳过。"
@@ -427,15 +434,14 @@ class ImageHarvesterPipeline:
             self._write_page_metadata_by_id(job_id, page_state.id)
             return False
 
-        if sequence_mode and sequence_probe_url is not None and sequence_upper_bound is not None:
-            self._run_sequence_probe(
-                job_id=job_id,
-                page_id=page_state.id,
-                page_num=page_num,
-                page_dir=page_dir,
-                upper_bound=sequence_upper_bound,
-                probe_url=sequence_probe_url,
-            )
+        self._run_sequence_probe(
+            job_id=job_id,
+            page_id=page_state.id,
+            page_num=page_num,
+            page_dir=page_dir,
+            upper_bound=sequence_upper_bound,
+            probe_url=sequence_probe_url,
+        )
 
         self._refresh_page_status(page_state.id)
         self._write_page_metadata_by_id(job_id, page_state.id)
@@ -443,27 +449,12 @@ class ImageHarvesterPipeline:
         assert page_state_after is not None
         return page_state_after.status in {"completed", "completed_with_failures"}
 
-    def _tuples_from_image_urls(
-        self,
-        image_urls: list[str],
-        page_dir: Path,
-    ) -> list[tuple[int, str, str]]:
-        tuples: list[tuple[int, str, str]] = []
-        for idx, image_url in enumerate(image_urls, start=1):
-            local_path = page_dir / image_file_name(idx, image_url)
-            tuples.append((idx, image_url, str(local_path)))
-        return tuples
-
     def _build_sequence_tuples(
         self,
         image_urls: list[str],
         page_dir: Path,
-        upper_bound: int | None,
-    ) -> tuple[list[tuple[int, str, str]], str | None, bool]:
-        default_tuples = self._tuples_from_image_urls(image_urls, page_dir)
-        if upper_bound is None:
-            return default_tuples, None, False
-
+        upper_bound: int,
+    ) -> tuple[list[tuple[int, str, str]], str]:
         seed: tuple[str, int, str, int] | None = None
         for image_url in image_urls:
             parsed = extract_sequence_seed(image_url)
@@ -472,11 +463,13 @@ class ImageHarvesterPipeline:
             seed = parsed
             break
         if seed is None:
-            return default_tuples, None, False
+            raise ValueError("序号扩展失败：未解析到可扩展的编号图片路径。")
 
         base_path, number_width, extension, start_index = seed
         if start_index > upper_bound:
-            return default_tuples, None, False
+            raise ValueError(
+                f"序号扩展失败：首个编号 {start_index} 超过页面上限 {upper_bound}。"
+            )
 
         known_urls: dict[int, str] = {}
         for image_url in image_urls:
@@ -497,7 +490,7 @@ class ImageHarvesterPipeline:
             tuples.append((idx, image_url, str(local_path)))
 
         probe_url = build_sequence_url(base_path, number_width, extension, upper_bound + 1)
-        return tuples, probe_url, True
+        return tuples, probe_url
 
     def _run_sequence_probe(
         self,

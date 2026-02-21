@@ -115,13 +115,22 @@ def _config(tmp_path: Path, **overrides: object) -> RunConfig:
         "request_delay_sec": 0.0,
         "page_retries": 0,
         "image_retries": 0,
-        "sequence_expand_enabled": False,
     }
     payload.update(overrides)
     return RunConfig(**payload)
 
 
 def _html_for(*images: str) -> str:
+    tags = "\n".join([f'<img src="{url}" />' for url in images])
+    return (
+        "<html><body>"
+        f"<div id='tishi'><p>全本<span>{len(images)}</span>张图片，欣赏完整作品</p></div>"
+        f"<div class='gallerypic'>{tags}</div>"
+        "</body></html>"
+    )
+
+
+def _html_without_upper(*images: str) -> str:
     tags = "\n".join([f'<img src="{url}" />' for url in images])
     return f"<html><body><div class='gallerypic'>{tags}</div></body></html>"
 
@@ -140,10 +149,10 @@ def test_run_creates_metadata_and_respects_end_num(workspace_temp_dir: Path) -> 
     cfg = _config(workspace_temp_dir, end_num=2)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for(
-            "https://img.test/1/a.jpg", "https://img.test/1/b.jpg"
+            "https://img.test/1/001.jpg", "https://img.test/1/002.jpg"
         ),
         "https://example.test/gallery/2.html": _html_for(
-            "https://img.test/2/a.jpg", "https://img.test/2/b.jpg"
+            "https://img.test/2/001.jpg", "https://img.test/2/002.jpg"
         ),
     }
     store = StateStore(cfg.state_db)
@@ -237,7 +246,7 @@ def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> N
     cfg = _config(workspace_temp_dir)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for(
-            "https://img.test/good.jpg", "https://img.test/bad.jpg"
+            "https://img.test/r/001.jpg", "https://img.test/r/002.jpg"
         )
     }
     store = StateStore(cfg.state_db)
@@ -247,7 +256,7 @@ def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> N
             config=cfg,
             store=store,
             fetcher=FakeFetcher(html_by_url),
-            downloader=FailOneDownloader("bad.jpg"),
+            downloader=FailOneDownloader("/002.jpg"),
         )
         pipeline_run.run(job_id=job_id, config_json=run_config_json(cfg))
         assert len(store.get_failed_images(job_id)) == 1
@@ -267,7 +276,7 @@ def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> N
 
 
 def test_sequence_expand_stops_as_completed_when_probe_next_fails(workspace_temp_dir: Path) -> None:
-    cfg = _config(workspace_temp_dir, sequence_expand_enabled=True)
+    cfg = _config(workspace_temp_dir)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for_sequence(
             6,
@@ -299,7 +308,7 @@ def test_sequence_expand_stops_as_completed_when_probe_next_fails(workspace_temp
 def test_sequence_expand_marks_page_failed_when_not_reaching_upper_bound(
     workspace_temp_dir: Path,
 ) -> None:
-    cfg = _config(workspace_temp_dir, sequence_expand_enabled=True)
+    cfg = _config(workspace_temp_dir)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for_sequence(
             6,
@@ -328,9 +337,9 @@ def test_sequence_expand_marks_page_failed_when_not_reaching_upper_bound(
 
 
 def test_sequence_expand_requires_upper_bound_when_enabled(workspace_temp_dir: Path) -> None:
-    cfg = _config(workspace_temp_dir, sequence_expand_enabled=True)
+    cfg = _config(workspace_temp_dir)
     html_by_url = {
-        "https://example.test/gallery/1.html": _html_for("https://img.test/z/001.jpg"),
+        "https://example.test/gallery/1.html": _html_without_upper("https://img.test/z/001.jpg"),
     }
     store = StateStore(cfg.state_db)
     try:
@@ -348,5 +357,35 @@ def test_sequence_expand_requires_upper_bound_when_enabled(workspace_temp_dir: P
         assert page.image_count == 0
         events = store.list_events(job_id, limit=50)
         assert any(e["event_type"] == "sequence_upper_bound_missing" for e in events)
+    finally:
+        store.close()
+
+
+def test_sequence_expand_fails_when_seed_missing(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir)
+    html_by_url = {
+        "https://example.test/gallery/1.html": _html_for_sequence(
+            6,
+            "https://img.test/z/cover.jpg",
+            "https://img.test/z/poster.jpg",
+            "https://img.test/z/thumb.jpg",
+        ),
+    }
+    store = StateStore(cfg.state_db)
+    try:
+        pipeline = ImageHarvesterPipeline(
+            config=cfg,
+            store=store,
+            fetcher=FakeFetcher(html_by_url),
+            downloader=AlwaysSuccessDownloader(),
+        )
+        job_id = compute_job_id(cfg)
+        pipeline.run(job_id=job_id, config_json=run_config_json(cfg))
+        page = store.get_page(job_id, 1)
+        assert page is not None
+        assert page.status == "failed_fetch"
+        assert page.image_count == 0
+        events = store.list_events(job_id, limit=50)
+        assert any(e["event_type"] == "sequence_seed_missing" for e in events)
     finally:
         store.close()

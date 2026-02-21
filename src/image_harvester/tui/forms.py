@@ -23,7 +23,6 @@ FORM_DEFAULTS: dict[str, Any] = {
     "request_delay_sec": "0.2",
     "stop_after_consecutive_page_failures": "5",
     "playwright_fallback": False,
-    "sequence_expand_enabled": True,
     "sequence_count_selector": "#tishi p span",
     "sequence_require_upper_bound": True,
 }
@@ -54,7 +53,6 @@ def payload_from_run_config(run_config: RunConfig) -> dict[str, object]:
             run_config.stop_after_consecutive_page_failures
         ),
         "playwright_fallback": run_config.playwright_fallback,
-        "sequence_expand_enabled": run_config.sequence_expand_enabled,
         "sequence_count_selector": run_config.sequence_count_selector,
         "sequence_require_upper_bound": run_config.sequence_require_upper_bound,
     }
@@ -86,11 +84,6 @@ def build_run_config_from_form(payload: Mapping[str, object]) -> RunConfig:
         payload,
         "playwright_fallback",
         bool(FORM_DEFAULTS["playwright_fallback"]),
-    )
-    raw["sequence_expand_enabled"] = _bool_or_default(
-        payload,
-        "sequence_expand_enabled",
-        bool(FORM_DEFAULTS["sequence_expand_enabled"]),
     )
     raw["sequence_count_selector"] = _text_or_default(
         payload,
@@ -226,11 +219,6 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                 value=bool(defaults["playwright_fallback"]),
                 id="playwright_fallback",
             )
-            yield Checkbox(
-                "启用序号扩展下载 sequence_expand_enabled",
-                value=bool(defaults["sequence_expand_enabled"]),
-                id="sequence_expand_enabled",
-            )
             yield Label("序号上限选择器 sequence_count_selector")
             yield Input(
                 value=str(defaults["sequence_count_selector"]),
@@ -268,10 +256,6 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                     Input,
                 ).value,
                 "playwright_fallback": self.query_one("#playwright_fallback", Checkbox).value,
-                "sequence_expand_enabled": self.query_one(
-                    "#sequence_expand_enabled",
-                    Checkbox,
-                ).value,
                 "sequence_count_selector": self.query_one("#sequence_count_selector", Input).value,
                 "sequence_require_upper_bound": self.query_one(
                     "#sequence_require_upper_bound",
@@ -320,10 +304,6 @@ try:  # pragma: no cover - UI class is covered by manual interaction
             self.query_one("#playwright_fallback", Checkbox).value = _coerce_bool(
                 payload.get("playwright_fallback"),
                 bool(FORM_DEFAULTS["playwright_fallback"]),
-            )
-            self.query_one("#sequence_expand_enabled", Checkbox).value = _coerce_bool(
-                payload.get("sequence_expand_enabled"),
-                bool(FORM_DEFAULTS["sequence_expand_enabled"]),
             )
             self.query_one("#sequence_count_selector", Input).value = str(
                 payload.get("sequence_count_selector", FORM_DEFAULTS["sequence_count_selector"])

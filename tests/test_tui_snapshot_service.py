@@ -70,7 +70,6 @@ def _config(tmp_path: Path, **overrides: object) -> RunConfig:
         "request_delay_sec": 0.0,
         "page_retries": 0,
         "image_retries": 0,
-        "sequence_expand_enabled": False,
     }
     payload.update(overrides)
     return RunConfig(**payload)
@@ -78,13 +77,18 @@ def _config(tmp_path: Path, **overrides: object) -> RunConfig:
 
 def _html_for(*images: str) -> str:
     tags = "\n".join([f'<img src="{url}" />' for url in images])
-    return f"<html><body><div class='gallerypic'>{tags}</div></body></html>"
+    return (
+        "<html><body>"
+        f"<div id='tishi'><p>全本<span>{len(images)}</span>张图片，欣赏完整作品</p></div>"
+        f"<div class='gallerypic'>{tags}</div>"
+        "</body></html>"
+    )
 
 
 def test_snapshot_service_reads_stats_events_and_pages(workspace_temp_dir: Path) -> None:
     cfg = _config(workspace_temp_dir)
     html_by_url = {
-        "https://example.test/gallery/1.html": _html_for("https://img.test/1.jpg"),
+        "https://example.test/gallery/1.html": _html_for("https://img.test/001.jpg"),
     }
     job_id = compute_job_id(cfg)
 
@@ -116,8 +120,8 @@ def test_snapshot_service_reads_stats_events_and_pages(workspace_temp_dir: Path)
 def test_snapshot_service_orders_pages_and_events_desc(workspace_temp_dir: Path) -> None:
     cfg = _config(workspace_temp_dir, end_num=2)
     html_by_url = {
-        "https://example.test/gallery/1.html": _html_for("https://img.test/1.jpg"),
-        "https://example.test/gallery/2.html": _html_for("https://img.test/2.jpg"),
+        "https://example.test/gallery/1.html": _html_for("https://img.test/001.jpg"),
+        "https://example.test/gallery/2.html": _html_for("https://img.test/001.jpg"),
     }
     job_id = compute_job_id(cfg)
 
