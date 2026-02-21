@@ -78,6 +78,7 @@ def _config(tmp_path: Path, **overrides: object) -> RunConfig:
         "request_delay_sec": 0.0,
         "page_retries": 0,
         "image_retries": 0,
+        "sequence_expand_enabled": False,
     }
     payload.update(overrides)
     return RunConfig(**payload)

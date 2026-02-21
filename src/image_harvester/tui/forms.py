@@ -23,6 +23,9 @@ FORM_DEFAULTS: dict[str, Any] = {
     "request_delay_sec": "0.2",
     "stop_after_consecutive_page_failures": "5",
     "playwright_fallback": False,
+    "sequence_expand_enabled": True,
+    "sequence_count_selector": "#tishi p span",
+    "sequence_require_upper_bound": True,
 }
 
 
@@ -57,6 +60,21 @@ def build_run_config_from_form(payload: Mapping[str, object]) -> RunConfig:
         payload,
         "playwright_fallback",
         bool(FORM_DEFAULTS["playwright_fallback"]),
+    )
+    raw["sequence_expand_enabled"] = _bool_or_default(
+        payload,
+        "sequence_expand_enabled",
+        bool(FORM_DEFAULTS["sequence_expand_enabled"]),
+    )
+    raw["sequence_count_selector"] = _text_or_default(
+        payload,
+        "sequence_count_selector",
+        str(FORM_DEFAULTS["sequence_count_selector"]),
+    )
+    raw["sequence_require_upper_bound"] = _bool_or_default(
+        payload,
+        "sequence_require_upper_bound",
+        bool(FORM_DEFAULTS["sequence_require_upper_bound"]),
     )
     return build_run_config(raw)
 
@@ -169,6 +187,21 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                 value=bool(defaults["playwright_fallback"]),
                 id="playwright_fallback",
             )
+            yield Checkbox(
+                "启用序号扩展下载 sequence_expand_enabled",
+                value=bool(defaults["sequence_expand_enabled"]),
+                id="sequence_expand_enabled",
+            )
+            yield Label("序号上限选择器 sequence_count_selector")
+            yield Input(
+                value=str(defaults["sequence_count_selector"]),
+                id="sequence_count_selector",
+            )
+            yield Checkbox(
+                "要求解析上限 sequence_require_upper_bound",
+                value=bool(defaults["sequence_require_upper_bound"]),
+                id="sequence_require_upper_bound",
+            )
             yield Button("开始任务", id="start-run", variant="primary")
             yield Static("", id="run-form-status")
             yield Static("", id="run-form-error")
@@ -196,6 +229,15 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                     Input,
                 ).value,
                 "playwright_fallback": self.query_one("#playwright_fallback", Checkbox).value,
+                "sequence_expand_enabled": self.query_one(
+                    "#sequence_expand_enabled",
+                    Checkbox,
+                ).value,
+                "sequence_count_selector": self.query_one("#sequence_count_selector", Input).value,
+                "sequence_require_upper_bound": self.query_one(
+                    "#sequence_require_upper_bound",
+                    Checkbox,
+                ).value,
             }
 
         def state_db_path_text(self) -> str:

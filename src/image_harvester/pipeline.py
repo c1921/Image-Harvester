@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +12,8 @@ from .downloader import ImageDownloader, file_sha256
 from .fetchers.base import BaseFetcher
 from .models import FetchResult, RunConfig, utc_now_iso
 from .naming import image_file_name, page_dir_name, source_id_from_page_url
-from .parser import parse_image_urls
+from .parser import parse_gallery_upper_bound, parse_image_urls
+from .sequence import build_sequence_url, extract_sequence_seed
 from .state import StateStore
 
 
@@ -267,14 +267,66 @@ class ImageHarvesterPipeline:
             return False
 
         page_dir = self.config.output_dir / page_dir_name(page_num, source_id)
-        tuples: list[tuple[int, str, str]] = []
-        for idx, image_url in enumerate(parse_result.image_urls, start=1):
-            local_path = page_dir / image_file_name(idx, image_url)
-            tuples.append((idx, image_url, str(local_path)))
+        sequence_upper_bound: int | None = None
+        sequence_probe_url: str | None = None
+        sequence_mode = False
+
+        if self.config.sequence_expand_enabled:
+            sequence_upper_bound = parse_gallery_upper_bound(
+                fetch_result.html,
+                self.config.sequence_count_selector,
+            )
+            if sequence_upper_bound is None and self.config.sequence_require_upper_bound:
+                message = (
+                    "序号扩展已启用，但未解析到图集上限。"
+                    f"选择器: {self.config.sequence_count_selector}"
+                )
+                self.store.update_page(
+                    page_state.id,
+                    status="failed_fetch",
+                    image_count=0,
+                    error=message,
+                    finish=True,
+                )
+                self._write_page_metadata_by_id(job_id, page_state.id)
+                self.store.add_event(
+                    job_id,
+                    "sequence_upper_bound_missing",
+                    f"页面 {page_num} 失败: {message}",
+                    page_id=page_state.id,
+                )
+                return False
+
+            tuples, sequence_probe_url, sequence_mode = self._build_sequence_tuples(
+                parse_result.image_urls,
+                page_dir,
+                sequence_upper_bound,
+            )
+            if sequence_mode:
+                assert sequence_upper_bound is not None
+                self.store.add_event(
+                    job_id,
+                    "sequence_expand_enabled",
+                    (
+                        f"页面 {page_num} 启用序号扩展: "
+                        f"上限={sequence_upper_bound}, 计划下载={len(tuples)}"
+                    ),
+                    page_id=page_state.id,
+                )
+            else:
+                self.store.add_event(
+                    job_id,
+                    "sequence_expand_fallback",
+                    f"页面 {page_num} 未命中序号规则，回退 DOM 链接模式。",
+                    page_id=page_state.id,
+                )
+        else:
+            tuples = self._tuples_from_image_urls(parse_result.image_urls, page_dir)
 
         self.store.upsert_page_images(page_state.id, tuples)
         self.store.update_page(page_state.id, status="running", image_count=len(tuples))
         page_images = self.store.get_page_images(page_state.id)
+        sequence_incomplete = False
 
         for image in page_images:
             if image.status in {"completed", "failed"}:
@@ -349,12 +401,150 @@ class ImageHarvesterPipeline:
                     ),
                     page_id=page_state.id,
                 )
+                if sequence_mode and sequence_upper_bound is not None:
+                    if image.image_index <= sequence_upper_bound:
+                        sequence_incomplete = True
+                        break
+
+        if sequence_incomplete and sequence_upper_bound is not None:
+            message = (
+                f"页面 {page_num} 未达到上限 {sequence_upper_bound} 即下载失败，"
+                "标记为失败并跳过。"
+            )
+            self.store.update_page(
+                page_state.id,
+                status="failed_fetch",
+                image_count=len(tuples),
+                error=message,
+                finish=True,
+            )
+            self.store.add_event(
+                job_id,
+                "sequence_incomplete_failed",
+                message,
+                page_id=page_state.id,
+            )
+            self._write_page_metadata_by_id(job_id, page_state.id)
+            return False
+
+        if sequence_mode and sequence_probe_url is not None and sequence_upper_bound is not None:
+            self._run_sequence_probe(
+                job_id=job_id,
+                page_id=page_state.id,
+                page_num=page_num,
+                page_dir=page_dir,
+                upper_bound=sequence_upper_bound,
+                probe_url=sequence_probe_url,
+            )
 
         self._refresh_page_status(page_state.id)
         self._write_page_metadata_by_id(job_id, page_state.id)
         page_state_after = self.store.get_page(job_id, page_num)
         assert page_state_after is not None
         return page_state_after.status in {"completed", "completed_with_failures"}
+
+    def _tuples_from_image_urls(
+        self,
+        image_urls: list[str],
+        page_dir: Path,
+    ) -> list[tuple[int, str, str]]:
+        tuples: list[tuple[int, str, str]] = []
+        for idx, image_url in enumerate(image_urls, start=1):
+            local_path = page_dir / image_file_name(idx, image_url)
+            tuples.append((idx, image_url, str(local_path)))
+        return tuples
+
+    def _build_sequence_tuples(
+        self,
+        image_urls: list[str],
+        page_dir: Path,
+        upper_bound: int | None,
+    ) -> tuple[list[tuple[int, str, str]], str | None, bool]:
+        default_tuples = self._tuples_from_image_urls(image_urls, page_dir)
+        if upper_bound is None:
+            return default_tuples, None, False
+
+        seed: tuple[str, int, str, int] | None = None
+        for image_url in image_urls:
+            parsed = extract_sequence_seed(image_url)
+            if parsed is None:
+                continue
+            seed = parsed
+            break
+        if seed is None:
+            return default_tuples, None, False
+
+        base_path, number_width, extension, start_index = seed
+        if start_index > upper_bound:
+            return default_tuples, None, False
+
+        known_urls: dict[int, str] = {}
+        for image_url in image_urls:
+            parsed = extract_sequence_seed(image_url)
+            if parsed is None:
+                continue
+            p_base, p_width, p_ext, p_index = parsed
+            if p_base == base_path and p_width == number_width and p_ext == extension:
+                known_urls[p_index] = image_url
+
+        tuples: list[tuple[int, str, str]] = []
+        for idx in range(start_index, upper_bound + 1):
+            image_url = known_urls.get(
+                idx,
+                build_sequence_url(base_path, number_width, extension, idx),
+            )
+            local_path = page_dir / image_file_name(idx, image_url)
+            tuples.append((idx, image_url, str(local_path)))
+
+        probe_url = build_sequence_url(base_path, number_width, extension, upper_bound + 1)
+        return tuples, probe_url, True
+
+    def _run_sequence_probe(
+        self,
+        *,
+        job_id: str,
+        page_id: int,
+        page_num: int,
+        page_dir: Path,
+        upper_bound: int,
+        probe_url: str,
+    ) -> None:
+        probe_path = page_dir / f".probe_{upper_bound + 1:04d}"
+        probe_result = self.downloader.download(
+            url=probe_url,
+            destination=probe_path,
+            timeout_sec=self.config.image_timeout_sec,
+            retries=self.config.image_retries,
+            delay_sec=self.config.request_delay_sec,
+        )
+
+        try:
+            if probe_path.exists():
+                probe_path.unlink()
+        except OSError:
+            pass
+
+        if probe_result.ok:
+            self.store.add_event(
+                job_id,
+                "sequence_probe_unexpected_success",
+                (
+                    f"页面 {page_num} 上限参考为 {upper_bound}，但探测下一张成功: {probe_url}。"
+                    "按已下载结果完成。"
+                ),
+                page_id=page_id,
+            )
+            return
+
+        self.store.add_event(
+            job_id,
+            "sequence_probe_end",
+            (
+                f"页面 {page_num} 已达到上限 {upper_bound}，"
+                "探测下一张失败，判定页面完成。"
+            ),
+            page_id=page_id,
+        )
 
     def _fetch_with_retries(self, fetcher: BaseFetcher, url: str, retries: int) -> FetchResult:
         attempts = retries + 1

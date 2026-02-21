@@ -23,6 +23,8 @@ def test_form_builds_valid_run_config() -> None:
     assert config.start_num == 1
     assert config.end_num is None
     assert config.engine == "requests"
+    assert config.sequence_expand_enabled is True
+    assert config.sequence_count_selector == "#tishi p span"
 
 
 def test_form_requires_url_template() -> None:

@@ -115,6 +115,7 @@ def _config(tmp_path: Path, **overrides: object) -> RunConfig:
         "request_delay_sec": 0.0,
         "page_retries": 0,
         "image_retries": 0,
+        "sequence_expand_enabled": False,
     }
     payload.update(overrides)
     return RunConfig(**payload)
@@ -123,6 +124,16 @@ def _config(tmp_path: Path, **overrides: object) -> RunConfig:
 def _html_for(*images: str) -> str:
     tags = "\n".join([f'<img src="{url}" />' for url in images])
     return f"<html><body><div class='gallerypic'>{tags}</div></body></html>"
+
+
+def _html_for_sequence(total: int, *images: str) -> str:
+    tags = "\n".join([f'<img src="{url}" />' for url in images])
+    return (
+        "<html><body>"
+        f"<div id='tishi'><p>全本<span>{total}</span>张图片，欣赏完整作品</p></div>"
+        f"<div class='gallerypic'>{tags}</div>"
+        "</body></html>"
+    )
 
 
 def test_run_creates_metadata_and_respects_end_num(workspace_temp_dir: Path) -> None:
@@ -251,5 +262,91 @@ def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> N
         assert retry_summary["retried"] == 1
         assert retry_summary["recovered"] == 1
         assert len(store.get_failed_images(job_id)) == 0
+    finally:
+        store.close()
+
+
+def test_sequence_expand_stops_as_completed_when_probe_next_fails(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir, sequence_expand_enabled=True)
+    html_by_url = {
+        "https://example.test/gallery/1.html": _html_for_sequence(
+            6,
+            "https://img.test/x/001.jpg",
+            "https://img.test/x/002.jpg",
+            "https://img.test/x/003.jpg",
+        ),
+    }
+    store = StateStore(cfg.state_db)
+    try:
+        pipeline = ImageHarvesterPipeline(
+            config=cfg,
+            store=store,
+            fetcher=FakeFetcher(html_by_url),
+            downloader=FailOneDownloader("/007.jpg"),
+        )
+        job_id = compute_job_id(cfg)
+        summary = pipeline.run(job_id=job_id, config_json=run_config_json(cfg))
+        assert summary["images"]["completed_images"] == 6
+        page = store.get_page(job_id, 1)
+        assert page is not None
+        assert page.status == "completed"
+        events = store.list_events(job_id, limit=50)
+        assert any(e["event_type"] == "sequence_probe_end" for e in events)
+    finally:
+        store.close()
+
+
+def test_sequence_expand_marks_page_failed_when_not_reaching_upper_bound(
+    workspace_temp_dir: Path,
+) -> None:
+    cfg = _config(workspace_temp_dir, sequence_expand_enabled=True)
+    html_by_url = {
+        "https://example.test/gallery/1.html": _html_for_sequence(
+            6,
+            "https://img.test/y/001.jpg",
+            "https://img.test/y/002.jpg",
+            "https://img.test/y/003.jpg",
+        ),
+    }
+    store = StateStore(cfg.state_db)
+    try:
+        pipeline = ImageHarvesterPipeline(
+            config=cfg,
+            store=store,
+            fetcher=FakeFetcher(html_by_url),
+            downloader=FailOneDownloader("/005.jpg"),
+        )
+        job_id = compute_job_id(cfg)
+        pipeline.run(job_id=job_id, config_json=run_config_json(cfg))
+        page = store.get_page(job_id, 1)
+        assert page is not None
+        assert page.status == "failed_fetch"
+        events = store.list_events(job_id, limit=50)
+        assert any(e["event_type"] == "sequence_incomplete_failed" for e in events)
+    finally:
+        store.close()
+
+
+def test_sequence_expand_requires_upper_bound_when_enabled(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir, sequence_expand_enabled=True)
+    html_by_url = {
+        "https://example.test/gallery/1.html": _html_for("https://img.test/z/001.jpg"),
+    }
+    store = StateStore(cfg.state_db)
+    try:
+        pipeline = ImageHarvesterPipeline(
+            config=cfg,
+            store=store,
+            fetcher=FakeFetcher(html_by_url),
+            downloader=AlwaysSuccessDownloader(),
+        )
+        job_id = compute_job_id(cfg)
+        pipeline.run(job_id=job_id, config_json=run_config_json(cfg))
+        page = store.get_page(job_id, 1)
+        assert page is not None
+        assert page.status == "failed_fetch"
+        assert page.image_count == 0
+        events = store.list_events(job_id, limit=50)
+        assert any(e["event_type"] == "sequence_upper_bound_missing" for e in events)
     finally:
         store.close()
