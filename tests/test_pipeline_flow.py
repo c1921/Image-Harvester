@@ -158,8 +158,8 @@ def test_run_creates_metadata_and_respects_end_num(workspace_temp_dir: Path) -> 
         summary = pipeline.run(job_id=job_id, config_json=run_config_json(cfg))
         assert summary["images"]["completed_images"] == 4
 
-        page1_metadata = cfg.output_dir / "P000001_1" / "metadata.json"
-        page2_metadata = cfg.output_dir / "P000002_2" / "metadata.json"
+        page1_metadata = cfg.output_dir / "000001" / "metadata.json"
+        page2_metadata = cfg.output_dir / "000002" / "metadata.json"
         assert page1_metadata.exists()
         assert page2_metadata.exists()
 

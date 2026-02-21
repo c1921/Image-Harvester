@@ -27,8 +27,8 @@ def test_parse_image_urls_keeps_dom_order() -> None:
 def test_naming_rules() -> None:
     assert source_id_from_page_url("https://a.example/gallery/1234.html", 77) == "1234"
     assert source_id_from_page_url("https://a.example/path/no-id", 77) == "77"
-    assert page_dir_name(12, "98") == "P000012_98"
-    assert image_file_name(7, "https://a.example/cat/pic-01.jpg?token=x") == "I0007_pic-01.jpg"
+    assert page_dir_name(12, "98") == "000012"
+    assert image_file_name(7, "https://a.example/cat/pic-01.jpg?token=x") == "pic-01.jpg"
 
 
 def test_parse_gallery_upper_bound_from_tishi_span() -> None:

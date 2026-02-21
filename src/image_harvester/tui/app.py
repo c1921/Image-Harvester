@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .forms import RunConfigForm, build_run_config_from_form
+from ..models import RunConfig
+from .forms import RunConfigForm, build_run_config_from_form, payload_from_run_config
 from .services import RunWorker, SnapshotService
 
 _TEXTUAL_IMPORT_ERROR: Exception | None = None
@@ -105,6 +106,7 @@ if _TEXTUAL_IMPORT_ERROR is None:
             self._last_worker_status: str | None = None
             self._last_warning_fingerprint: str | None = None
             self._quit_guard_armed = False
+            self._auto_restore_done = False
 
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
@@ -129,6 +131,7 @@ if _TEXTUAL_IMPORT_ERROR is None:
             yield Footer()
 
         def on_mount(self) -> None:
+            self._auto_restore_latest_job_on_mount()
             self._refresh_all()
             self.set_interval(1.0, self._refresh_all)
 
@@ -176,14 +179,31 @@ if _TEXTUAL_IMPORT_ERROR is None:
                 self._set_status(f"配置错误: {exc}")
                 return
 
-            form.set_error("")
+            if self._start_run_with_config(run_config, started_message=None):
+                self._refresh_all()
+
+        def _start_run_with_config(
+            self,
+            run_config: RunConfig,
+            *,
+            started_message: str | None,
+        ) -> bool:
+            if self._worker and self._worker.is_running():
+                self._set_status("已有任务在运行中，请等待完成后再启动。")
+                return False
+
+            form = self._form()
+            if form is not None:
+                form.set_error("")
+
             worker = RunWorker(run_config)
             try:
                 worker.start()
             except Exception as exc:
-                form.set_error(str(exc))
+                if form is not None:
+                    form.set_error(str(exc))
                 self._set_status(f"启动失败: {exc}")
-                return
+                return False
 
             self._worker = worker
             self._selected_job_id = worker.job_id
@@ -191,9 +211,53 @@ if _TEXTUAL_IMPORT_ERROR is None:
             self._last_warning_fingerprint = None
             self._quit_guard_armed = False
             self._sync_snapshot_service(force=True, state_db=run_config.state_db)
-            form.set_status(f"当前任务: {worker.job_id}")
-            self._set_status(f"任务已启动: {worker.job_id}")
-            self._refresh_all()
+            if form is not None:
+                form.set_status(f"当前任务: {worker.job_id}")
+            if started_message:
+                self._set_status(started_message)
+            else:
+                self._set_status(f"任务已启动: {worker.job_id}")
+            return True
+
+        def _auto_restore_latest_job_on_mount(self) -> None:
+            if self._auto_restore_done:
+                return
+            self._auto_restore_done = True
+
+            self._sync_snapshot_service(force=True)
+            service = self._snapshot_service
+            if service is None:
+                return
+
+            latest = service.latest_job()
+            if latest is None:
+                return
+
+            fallback_db = self._snapshot_db or Path("data/state.sqlite3")
+            run_config = service.load_run_config_from_job(
+                latest.job_id,
+                fallback_state_db=fallback_db,
+            )
+            if run_config is None:
+                self._set_status(f"无法恢复上次任务配置: {latest.job_id}")
+                return
+
+            form = self._form()
+            if form is not None:
+                form.set_payload(payload_from_run_config(run_config))
+                form.set_error("")
+                form.set_status(f"已回填上次任务配置: {latest.job_id}")
+
+            self._selected_job_id = latest.job_id
+            self._sync_snapshot_service(force=True, state_db=run_config.state_db)
+
+            if latest.status == "running":
+                self._start_run_with_config(
+                    run_config,
+                    started_message=f"检测到中断任务，已自动续跑: {latest.job_id}",
+                )
+            else:
+                self._set_status(f"已回填上次任务配置: {latest.job_id}")
 
         def _refresh_all(self) -> None:
             self._sync_worker_state()

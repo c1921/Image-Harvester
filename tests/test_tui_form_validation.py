@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from image_harvester.tui.forms import build_run_config_from_form, form_defaults
+from image_harvester.models import RunConfig
+from image_harvester.tui.forms import (
+    build_run_config_from_form,
+    form_defaults,
+    payload_from_run_config,
+)
 
 
 def _payload(**overrides: object) -> dict[str, object]:
@@ -49,3 +54,18 @@ def test_form_requires_num_placeholder_in_url_template() -> None:
     with pytest.raises(ValueError) as exc:
         build_run_config_from_form(_payload(url_template="https://example.test/gallery/page.html"))
     assert str(exc.value) == "url_template 必须包含 '{num}' 占位符。"
+
+
+def test_payload_from_run_config_uses_form_shape() -> None:
+    cfg = RunConfig(
+        url_template="https://example.test/gallery/{num}.html",
+        start_num=2,
+        end_num=None,
+        engine="requests",
+    )
+    payload = payload_from_run_config(cfg)
+    assert payload["url_template"] == "https://example.test/gallery/{num}.html"
+    assert payload["start_num"] == "2"
+    assert payload["end_num"] == ""
+    assert payload["engine"] == "requests"
+    assert payload["sequence_expand_enabled"] is True

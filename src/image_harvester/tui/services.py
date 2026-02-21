@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import copy
+import json
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from ..config import compute_job_id, run_config_json
+from ..config import build_run_config, compute_job_id, run_config_json
 from ..fetchers import PlaywrightFetcher, RequestsFetcher
 from ..fetchers.base import BaseFetcher
 from ..models import JobState, PageState, RunConfig, utc_now_iso
@@ -187,11 +188,43 @@ class SnapshotService:
             return []
         return jobs[:limit]
 
+    def latest_job(self) -> JobState | None:
+        """Return latest job record."""
+        with self._store() as store:
+            return store.get_latest_job()
+
     def latest_job_id(self) -> str | None:
         """Return latest job id or None."""
-        with self._store() as store:
-            latest = store.get_latest_job()
+        latest = self.latest_job()
         return latest.job_id if latest else None
+
+    def load_run_config_from_job(
+        self,
+        job_id: str,
+        *,
+        fallback_state_db: Path | None = None,
+    ) -> RunConfig | None:
+        """Parse RunConfig from persisted job config JSON."""
+        with self._store() as store:
+            job = store.get_job(job_id)
+        if job is None:
+            return None
+
+        try:
+            payload = json.loads(job.config_json)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        state_db = fallback_state_db or self.state_db
+        if not payload.get("state_db"):
+            payload["state_db"] = str(state_db)
+
+        try:
+            return build_run_config(payload)
+        except Exception:
+            return None
 
     def get_snapshot(
         self,

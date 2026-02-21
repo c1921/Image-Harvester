@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 from image_harvester.config import compute_job_id, run_config_json
@@ -108,3 +109,62 @@ def test_snapshot_service_reads_stats_events_and_pages(workspace_temp_dir: Path)
     assert snapshot.stats["images"]["completed_images"] == 1
     assert len(snapshot.pages) == 1
     assert any(item["event_type"] == "job_start" for item in snapshot.events)
+
+
+def test_snapshot_service_can_load_run_config_from_job(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir)
+    job_id = compute_job_id(cfg)
+    store = StateStore(cfg.state_db)
+    try:
+        store.upsert_job(job_id, run_config_json(cfg), "running")
+    finally:
+        store.close()
+
+    service = SnapshotService(cfg.state_db)
+    latest = service.latest_job()
+    assert latest is not None
+    assert latest.job_id == job_id
+    loaded = service.load_run_config_from_job(job_id)
+    assert loaded is not None
+    assert loaded.url_template == cfg.url_template
+    assert loaded.state_db == cfg.state_db
+
+
+def test_snapshot_service_load_run_config_fills_missing_state_db(
+    workspace_temp_dir: Path,
+) -> None:
+    state_db = workspace_temp_dir / "state.sqlite3"
+    payload = {
+        "url_template": "https://example.test/gallery/{num}.html",
+        "start_num": 1,
+        "end_num": 3,
+    }
+    store = StateStore(state_db)
+    try:
+        store.upsert_job("job_missing_state_db", json.dumps(payload), "completed")
+    finally:
+        store.close()
+
+    service = SnapshotService(state_db)
+    fallback_db = workspace_temp_dir / "fallback.sqlite3"
+    loaded = service.load_run_config_from_job(
+        "job_missing_state_db",
+        fallback_state_db=fallback_db,
+    )
+    assert loaded is not None
+    assert loaded.state_db == fallback_db
+    assert loaded.end_num == 3
+
+
+def test_snapshot_service_load_run_config_returns_none_on_invalid_json(
+    workspace_temp_dir: Path,
+) -> None:
+    state_db = workspace_temp_dir / "state.sqlite3"
+    store = StateStore(state_db)
+    try:
+        store.upsert_job("job_bad_json", "{bad-json", "failed")
+    finally:
+        store.close()
+
+    service = SnapshotService(state_db)
+    assert service.load_run_config_from_job("job_bad_json") is None

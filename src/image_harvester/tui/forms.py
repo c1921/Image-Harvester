@@ -34,6 +34,32 @@ def form_defaults() -> dict[str, Any]:
     return dict(FORM_DEFAULTS)
 
 
+def payload_from_run_config(run_config: RunConfig) -> dict[str, object]:
+    """Convert RunConfig into form payload shape."""
+    return {
+        "url_template": run_config.url_template,
+        "start_num": str(run_config.start_num),
+        "end_num": "" if run_config.end_num is None else str(run_config.end_num),
+        "selector": run_config.selector,
+        "output_dir": str(run_config.output_dir),
+        "state_db": str(run_config.state_db),
+        "engine": run_config.engine,
+        "resume": run_config.resume,
+        "page_timeout_sec": str(run_config.page_timeout_sec),
+        "image_timeout_sec": str(run_config.image_timeout_sec),
+        "image_retries": str(run_config.image_retries),
+        "page_retries": str(run_config.page_retries),
+        "request_delay_sec": str(run_config.request_delay_sec),
+        "stop_after_consecutive_page_failures": str(
+            run_config.stop_after_consecutive_page_failures
+        ),
+        "playwright_fallback": run_config.playwright_fallback,
+        "sequence_expand_enabled": run_config.sequence_expand_enabled,
+        "sequence_count_selector": run_config.sequence_count_selector,
+        "sequence_require_upper_bound": run_config.sequence_require_upper_bound,
+    }
+
+
 def build_run_config_from_form(payload: Mapping[str, object]) -> RunConfig:
     """Parse form payload into RunConfig with strict conversion."""
     raw: dict[str, Any] = {}
@@ -131,6 +157,19 @@ def _bool_or_default(payload: Mapping[str, object], field: str, default: bool) -
     if raw in {"0", "false", "no", "off", "n"}:
         return False
     raise ValueError(f"{field} 必须是布尔值。")
+
+
+def _coerce_bool(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "on", "y"}:
+        return True
+    if raw in {"0", "false", "no", "off", "n"}:
+        return False
+    return default
 
 
 try:  # pragma: no cover - UI class is covered by manual interaction
@@ -239,6 +278,60 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                     Checkbox,
                 ).value,
             }
+
+        def set_payload(self, payload: Mapping[str, object]) -> None:
+            self.query_one("#url_template", Input).value = str(payload.get("url_template", ""))
+            self.query_one("#start_num", Input).value = str(payload.get("start_num", ""))
+            self.query_one("#end_num", Input).value = str(payload.get("end_num", ""))
+            self.query_one("#selector", Input).value = str(payload.get("selector", ""))
+            self.query_one("#output_dir", Input).value = str(payload.get("output_dir", ""))
+            self.query_one("#state_db", Input).value = str(payload.get("state_db", ""))
+
+            engine_widget = self.query_one("#engine", Select)
+            engine_raw = str(payload.get("engine", FORM_DEFAULTS["engine"])).lower()
+            engine = engine_raw if engine_raw in {"requests", "playwright"} else "requests"
+            engine_widget.value = engine
+
+            self.query_one("#resume", Checkbox).value = _coerce_bool(
+                payload.get("resume"),
+                bool(FORM_DEFAULTS["resume"]),
+            )
+            self.query_one("#page_timeout_sec", Input).value = str(
+                payload.get("page_timeout_sec", FORM_DEFAULTS["page_timeout_sec"])
+            )
+            self.query_one("#image_timeout_sec", Input).value = str(
+                payload.get("image_timeout_sec", FORM_DEFAULTS["image_timeout_sec"])
+            )
+            self.query_one("#image_retries", Input).value = str(
+                payload.get("image_retries", FORM_DEFAULTS["image_retries"])
+            )
+            self.query_one("#page_retries", Input).value = str(
+                payload.get("page_retries", FORM_DEFAULTS["page_retries"])
+            )
+            self.query_one("#request_delay_sec", Input).value = str(
+                payload.get("request_delay_sec", FORM_DEFAULTS["request_delay_sec"])
+            )
+            self.query_one("#stop_after_consecutive_page_failures", Input).value = str(
+                payload.get(
+                    "stop_after_consecutive_page_failures",
+                    FORM_DEFAULTS["stop_after_consecutive_page_failures"],
+                )
+            )
+            self.query_one("#playwright_fallback", Checkbox).value = _coerce_bool(
+                payload.get("playwright_fallback"),
+                bool(FORM_DEFAULTS["playwright_fallback"]),
+            )
+            self.query_one("#sequence_expand_enabled", Checkbox).value = _coerce_bool(
+                payload.get("sequence_expand_enabled"),
+                bool(FORM_DEFAULTS["sequence_expand_enabled"]),
+            )
+            self.query_one("#sequence_count_selector", Input).value = str(
+                payload.get("sequence_count_selector", FORM_DEFAULTS["sequence_count_selector"])
+            )
+            self.query_one("#sequence_require_upper_bound", Checkbox).value = _coerce_bool(
+                payload.get("sequence_require_upper_bound"),
+                bool(FORM_DEFAULTS["sequence_require_upper_bound"]),
+            )
 
         def state_db_path_text(self) -> str:
             return self.query_one("#state_db", Input).value.strip()
