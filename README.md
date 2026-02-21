@@ -32,3 +32,18 @@ harvester export-metadata --help
 pip install -e ".[playwright]"
 playwright install chromium
 ```
+
+## Textual TUI
+
+安装 TUI 支持并启动：
+
+```bash
+pip install -e ".[tui]"
+harvester-tui
+```
+
+TUI 首版能力：
+
+- 完整表单配置并启动 `run`
+- 实时监控任务统计、页面进度、事件与失败样本
+- 浏览并切换历史任务详情

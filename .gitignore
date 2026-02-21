@@ -216,3 +216,10 @@ __marimo__/
 .streamlit/secrets.toml
 
 data/
+
+# Local pytest sandbox artifacts
+.pytest_tmp/
+manual-temp/
+manual-temp-tests/
+test-temp-run/
+pytest-cache-files-*/

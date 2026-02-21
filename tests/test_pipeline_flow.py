@@ -125,8 +125,8 @@ def _html_for(*images: str) -> str:
     return f"<html><body><div class='gallerypic'>{tags}</div></body></html>"
 
 
-def test_run_creates_metadata_and_respects_end_num(tmp_path: Path) -> None:
-    cfg = _config(tmp_path, end_num=2)
+def test_run_creates_metadata_and_respects_end_num(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir, end_num=2)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for(
             "https://img.test/1/a.jpg", "https://img.test/1/b.jpg"
@@ -169,8 +169,8 @@ def test_run_creates_metadata_and_respects_end_num(tmp_path: Path) -> None:
         store.close()
 
 
-def test_resume_after_crash_without_manual_start(tmp_path: Path) -> None:
-    cfg = _config(tmp_path)
+def test_resume_after_crash_without_manual_start(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for(
             "https://img.test/r/1.jpg", "https://img.test/r/2.jpg"
@@ -201,8 +201,8 @@ def test_resume_after_crash_without_manual_start(tmp_path: Path) -> None:
         store.close()
 
 
-def test_no_end_num_stops_after_consecutive_failures(tmp_path: Path) -> None:
-    cfg = _config(tmp_path, end_num=None, stop_after_consecutive_page_failures=2)
+def test_no_end_num_stops_after_consecutive_failures(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir, end_num=None, stop_after_consecutive_page_failures=2)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for("https://img.test/x/1.jpg"),
     }
@@ -222,8 +222,8 @@ def test_no_end_num_stops_after_consecutive_failures(tmp_path: Path) -> None:
         store.close()
 
 
-def test_retry_failed_only_retries_failed_records(tmp_path: Path) -> None:
-    cfg = _config(tmp_path)
+def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for(
             "https://img.test/good.jpg", "https://img.test/bad.jpg"
