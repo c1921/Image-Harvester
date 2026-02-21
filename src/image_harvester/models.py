@@ -113,12 +113,24 @@ class FetchResult:
 
 
 @dataclass(slots=True)
+class GalleryPageMeta:
+    """Structured page metadata extracted from gallery description/navigation."""
+
+    title: str = ""
+    published_date: str = ""
+    tags: list[str] = field(default_factory=list)
+    organizations: list[str] = field(default_factory=list)
+    models: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ParseResult:
     """Result of parsing image URLs from page HTML."""
 
     page_url: str
     selector: str
     image_urls: list[str]
+    gallery_meta: GalleryPageMeta = field(default_factory=GalleryPageMeta)
 
 
 @dataclass(slots=True)

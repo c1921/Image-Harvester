@@ -138,8 +138,9 @@ data/
 `metadata.json` 包含：
 
 - 页面信息：`job_id`、`page_num`、`page_url`、`source_id`、`selector`、`engine`
-- 图片明细：`index`、`url`、`local_path`、`status`、`http_status`、`sha256`、`error` 等
+- 页面元数据：`title`、`published_date`、`tags`、`organizations`、`models`
 - 汇总：`total_count`、`success_count`、`failed_count`、`duration_sec`、`status`
+- 不再包含逐图 `images` 明细字段（以减小单页元数据体积）
 
 ## 任务状态
 

@@ -10,7 +10,7 @@ from typing import Any
 
 from .downloader import ImageDownloader, file_sha256
 from .fetchers.base import BaseFetcher
-from .models import FetchResult, RunConfig, utc_now_iso
+from .models import FetchResult, GalleryPageMeta, RunConfig, utc_now_iso
 from .naming import image_file_name, page_dir_name, source_id_from_page_url
 from .parser import parse_gallery_upper_bound, parse_image_urls
 from .sequence import build_sequence_url, extract_sequence_seed
@@ -236,6 +236,7 @@ class ImageHarvesterPipeline:
             return False
 
         parse_result = parse_image_urls(fetch_result.html, page_url, self.config.selector)
+        gallery_meta = parse_result.gallery_meta
         if (
             not parse_result.image_urls
             and self.config.playwright_fallback
@@ -248,6 +249,7 @@ class ImageHarvesterPipeline:
                     page_url,
                     self.config.selector,
                 )
+                gallery_meta = parse_result.gallery_meta
 
         if not parse_result.image_urls:
             self.store.update_page(
@@ -257,7 +259,11 @@ class ImageHarvesterPipeline:
                 last_completed_image_index=0,
                 finish=True,
             )
-            self._write_page_metadata_by_id(job_id, page_state.id)
+            self._write_page_metadata_by_id(
+                job_id,
+                page_state.id,
+                gallery_meta=gallery_meta,
+            )
             self.store.add_event(
                 job_id,
                 "page_no_images",
@@ -283,7 +289,11 @@ class ImageHarvesterPipeline:
                 error=message,
                 finish=True,
             )
-            self._write_page_metadata_by_id(job_id, page_state.id)
+            self._write_page_metadata_by_id(
+                job_id,
+                page_state.id,
+                gallery_meta=gallery_meta,
+            )
             self.store.add_event(
                 job_id,
                 "sequence_upper_bound_missing",
@@ -307,7 +317,11 @@ class ImageHarvesterPipeline:
                 error=message,
                 finish=True,
             )
-            self._write_page_metadata_by_id(job_id, page_state.id)
+            self._write_page_metadata_by_id(
+                job_id,
+                page_state.id,
+                gallery_meta=gallery_meta,
+            )
             self.store.add_event(
                 job_id,
                 "sequence_seed_missing",
@@ -431,7 +445,11 @@ class ImageHarvesterPipeline:
                 message,
                 page_id=page_state.id,
             )
-            self._write_page_metadata_by_id(job_id, page_state.id)
+            self._write_page_metadata_by_id(
+                job_id,
+                page_state.id,
+                gallery_meta=gallery_meta,
+            )
             return False
 
         if self.config.sequence_probe_after_upper_bound:
@@ -445,7 +463,11 @@ class ImageHarvesterPipeline:
             )
 
         self._refresh_page_status(page_state.id)
-        self._write_page_metadata_by_id(job_id, page_state.id)
+        self._write_page_metadata_by_id(
+            job_id,
+            page_state.id,
+            gallery_meta=gallery_meta,
+        )
         page_state_after = self.store.get_page(job_id, page_num)
         assert page_state_after is not None
         return page_state_after.status in {"completed", "completed_with_failures"}
@@ -586,7 +608,12 @@ class ImageHarvesterPipeline:
             finish=True,
         )
 
-    def _write_page_metadata_by_id(self, job_id: str, page_id: int) -> None:
+    def _write_page_metadata_by_id(
+        self,
+        job_id: str,
+        page_id: int,
+        gallery_meta: GalleryPageMeta | None = None,
+    ) -> None:
         page = self.store.get_page_by_id(page_id)
         if page is None:
             return
@@ -595,29 +622,12 @@ class ImageHarvesterPipeline:
         page_output_dir.mkdir(parents=True, exist_ok=True)
         metadata_path = page_output_dir / "metadata.json"
 
-        payload_images: list[dict[str, Any]] = []
-        for image in images:
-            payload_images.append(
-                {
-                    "index": image.image_index,
-                    "url": image.url,
-                    "local_path": image.local_path,
-                    "status": image.status,
-                    "retries": image.retries,
-                    "http_status": image.http_status,
-                    "content_type": image.content_type,
-                    "size_bytes": image.size_bytes,
-                    "sha256": image.sha256,
-                    "downloaded_at": image.downloaded_at,
-                    "error": image.error,
-                }
-            )
-
         started_at = page.started_at
         ended_at = page.finished_at or utc_now_iso()
         duration_sec = self._duration_seconds(started_at, ended_at)
         success_count = sum(1 for img in images if img.status == "completed")
         failed_count = sum(1 for img in images if img.status == "failed")
+        meta = gallery_meta or self._load_existing_gallery_meta(metadata_path) or GalleryPageMeta()
 
         payload = {
             "job_id": job_id,
@@ -626,7 +636,11 @@ class ImageHarvesterPipeline:
             "source_id": page.source_id,
             "selector": self.config.selector,
             "engine": self.config.engine,
-            "images": payload_images,
+            "title": meta.title,
+            "published_date": meta.published_date,
+            "tags": meta.tags,
+            "organizations": meta.organizations,
+            "models": meta.models,
             "summary": {
                 "total_count": len(images),
                 "success_count": success_count,
@@ -638,6 +652,25 @@ class ImageHarvesterPipeline:
             },
         }
         self._atomic_write_json(metadata_path, payload)
+
+    def _load_existing_gallery_meta(self, metadata_path: Path) -> GalleryPageMeta | None:
+        if not metadata_path.exists():
+            return None
+
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        return GalleryPageMeta(
+            title=str(payload.get("title") or ""),
+            published_date=str(payload.get("published_date") or ""),
+            tags=[str(item) for item in (payload.get("tags") or []) if str(item)],
+            organizations=[
+                str(item) for item in (payload.get("organizations") or []) if str(item)
+            ],
+            models=[str(item) for item in (payload.get("models") or []) if str(item)],
+        )
 
     def _atomic_write_json(self, path: Path, payload: dict[str, Any]) -> None:
         tmp_path = path.with_suffix(path.suffix + ".tmp")

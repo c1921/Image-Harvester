@@ -145,10 +145,39 @@ def _html_for_sequence(total: int, *images: str) -> str:
     )
 
 
+def _html_for_with_meta(*images: str) -> str:
+    tags = "\n".join([f'<img src="{url}" />' for url in images])
+    return (
+        "<html><body>"
+        "<div class='gallery_jieshao'>"
+        "<h1>[YouMi]尤蜜荟 2024.07.10 Vol.1082 心妍小公主</h1>"
+        "<p>2024-11-02</p>"
+        "<p>"
+        "<a href='/tags/i-cup.html'>I-CUP</a>"
+        "<a href='/tags/meijiao.html'>美脚</a>"
+        "<a href='/tags/jiudian.html'>酒店</a>"
+        "</p>"
+        "</div>"
+        "<div class='gallery_nav'>"
+        "<div class='gallery_renwu'>"
+        "<a href='/jigou/98.html'><div class='gallery_chuangzuo'>机构</div></a>"
+        "<div class='gallery_renwu_title'><a href='/jigou/98.html'>尤蜜荟</a></div>"
+        "</div>"
+        "<div class='gallery_renwu'>"
+        "<a href='/mote/99.html'><div class='gallery_chujing'>模特</div></a>"
+        "<div class='gallery_renwu_title'><a href='/mote/99.html'>李妍曦</a></div>"
+        "</div>"
+        "</div>"
+        f"<div id='tishi'><p>全本<span>{len(images)}</span>张图片，欣赏完整作品</p></div>"
+        f"<div class='gallerypic'>{tags}</div>"
+        "</body></html>"
+    )
+
+
 def test_run_creates_metadata_and_respects_end_num(workspace_temp_dir: Path) -> None:
     cfg = _config(workspace_temp_dir, end_num=2)
     html_by_url = {
-        "https://example.test/gallery/1.html": _html_for(
+        "https://example.test/gallery/1.html": _html_for_with_meta(
             "https://img.test/1/001.jpg", "https://img.test/1/002.jpg"
         ),
         "https://example.test/gallery/2.html": _html_for(
@@ -180,11 +209,20 @@ def test_run_creates_metadata_and_respects_end_num(workspace_temp_dir: Path) -> 
             "source_id",
             "selector",
             "engine",
-            "images",
             "summary",
         }.issubset(metadata.keys())
-        assert metadata["images"][0]["index"] == 1
-        assert metadata["images"][0]["status"] == "completed"
+        assert {"title", "published_date", "tags", "organizations", "models"}.issubset(
+            metadata.keys()
+        )
+        assert "images" not in metadata
+        assert metadata["title"] == "[YouMi]尤蜜荟 2024.07.10 Vol.1082 心妍小公主"
+        assert metadata["published_date"] == "2024-11-02"
+        assert metadata["tags"] == ["I-CUP", "美脚", "酒店"]
+        assert metadata["organizations"] == ["尤蜜荟"]
+        assert metadata["models"] == ["李妍曦"]
+        assert metadata["summary"]["total_count"] == 2
+        assert metadata["summary"]["success_count"] == 2
+        assert metadata["summary"]["failed_count"] == 0
     finally:
         store.close()
 
@@ -245,7 +283,7 @@ def test_no_end_num_stops_after_consecutive_failures(workspace_temp_dir: Path) -
 def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> None:
     cfg = _config(workspace_temp_dir)
     html_by_url = {
-        "https://example.test/gallery/1.html": _html_for(
+        "https://example.test/gallery/1.html": _html_for_with_meta(
             "https://img.test/r/001.jpg", "https://img.test/r/002.jpg"
         )
     }
@@ -271,6 +309,12 @@ def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> N
         assert retry_summary["retried"] == 1
         assert retry_summary["recovered"] == 1
         assert len(store.get_failed_images(job_id)) == 0
+        metadata = json.loads((cfg.output_dir / "000001" / "metadata.json").read_text("utf-8"))
+        assert metadata["title"] == "[YouMi]尤蜜荟 2024.07.10 Vol.1082 心妍小公主"
+        assert metadata["published_date"] == "2024-11-02"
+        assert metadata["tags"] == ["I-CUP", "美脚", "酒店"]
+        assert metadata["organizations"] == ["尤蜜荟"]
+        assert metadata["models"] == ["李妍曦"]
     finally:
         store.close()
 
@@ -391,6 +435,13 @@ def test_sequence_expand_requires_upper_bound_when_enabled(workspace_temp_dir: P
         assert page.image_count == 0
         events = store.list_events(job_id, limit=50)
         assert any(e["event_type"] == "sequence_upper_bound_missing" for e in events)
+        metadata = json.loads((cfg.output_dir / "000001" / "metadata.json").read_text("utf-8"))
+        assert "images" not in metadata
+        assert metadata["title"] == ""
+        assert metadata["published_date"] == ""
+        assert metadata["tags"] == []
+        assert metadata["organizations"] == []
+        assert metadata["models"] == []
     finally:
         store.close()
 
