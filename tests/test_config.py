@@ -25,3 +25,4 @@ def test_build_run_config_sets_sequence_defaults() -> None:
     config = build_run_config({"url_template": "https://x/{num}", "start_num": 1})
     assert config.sequence_count_selector == "#tishi p span"
     assert config.sequence_require_upper_bound is True
+    assert config.sequence_probe_after_upper_bound is False

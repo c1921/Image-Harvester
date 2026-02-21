@@ -47,6 +47,9 @@ def build_run_config(raw: dict[str, Any]) -> RunConfig:
         playwright_fallback=bool(raw.get("playwright_fallback", False)),
         sequence_count_selector=str(raw.get("sequence_count_selector", "#tishi p span")),
         sequence_require_upper_bound=bool(raw.get("sequence_require_upper_bound", True)),
+        sequence_probe_after_upper_bound=bool(
+            raw.get("sequence_probe_after_upper_bound", False)
+        ),
     )
     validate_run_config(config)
     return config
@@ -101,5 +104,6 @@ def run_config_json(config: RunConfig) -> str:
         "playwright_fallback": config.playwright_fallback,
         "sequence_count_selector": config.sequence_count_selector,
         "sequence_require_upper_bound": config.sequence_require_upper_bound,
+        "sequence_probe_after_upper_bound": config.sequence_probe_after_upper_bound,
     }
     return json.dumps(payload, ensure_ascii=True, sort_keys=True)

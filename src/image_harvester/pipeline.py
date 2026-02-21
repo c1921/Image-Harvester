@@ -434,14 +434,15 @@ class ImageHarvesterPipeline:
             self._write_page_metadata_by_id(job_id, page_state.id)
             return False
 
-        self._run_sequence_probe(
-            job_id=job_id,
-            page_id=page_state.id,
-            page_num=page_num,
-            page_dir=page_dir,
-            upper_bound=sequence_upper_bound,
-            probe_url=sequence_probe_url,
-        )
+        if self.config.sequence_probe_after_upper_bound:
+            self._run_sequence_probe(
+                job_id=job_id,
+                page_id=page_state.id,
+                page_num=page_num,
+                page_dir=page_dir,
+                upper_bound=sequence_upper_bound,
+                probe_url=sequence_probe_url,
+            )
 
         self._refresh_page_status(page_state.id)
         self._write_page_metadata_by_id(job_id, page_state.id)

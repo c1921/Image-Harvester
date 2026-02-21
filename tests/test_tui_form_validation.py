@@ -29,6 +29,7 @@ def test_form_builds_valid_run_config() -> None:
     assert config.end_num is None
     assert config.engine == "requests"
     assert config.sequence_count_selector == "#tishi p span"
+    assert config.sequence_probe_after_upper_bound is False
 
 
 def test_form_requires_url_template() -> None:
@@ -68,3 +69,9 @@ def test_payload_from_run_config_uses_form_shape() -> None:
     assert payload["end_num"] == ""
     assert payload["engine"] == "requests"
     assert payload["sequence_count_selector"] == "#tishi p span"
+    assert payload["sequence_probe_after_upper_bound"] is False
+
+
+def test_form_can_enable_sequence_probe_after_upper_bound() -> None:
+    config = build_run_config_from_form(_payload(sequence_probe_after_upper_bound=True))
+    assert config.sequence_probe_after_upper_bound is True

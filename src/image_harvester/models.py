@@ -34,6 +34,7 @@ class RunConfig:
     playwright_fallback: bool = False
     sequence_count_selector: str = "#tishi p span"
     sequence_require_upper_bound: bool = True
+    sequence_probe_after_upper_bound: bool = False
 
     def as_job_identity(self) -> dict[str, Any]:
         """Subset used to derive stable job identifier."""
@@ -44,6 +45,7 @@ class RunConfig:
             "engine": self.engine,
             "sequence_count_selector": self.sequence_count_selector,
             "sequence_require_upper_bound": self.sequence_require_upper_bound,
+            "sequence_probe_after_upper_bound": self.sequence_probe_after_upper_bound,
         }
 
 

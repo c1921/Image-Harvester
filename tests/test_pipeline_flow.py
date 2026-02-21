@@ -275,8 +275,42 @@ def test_retry_failed_only_retries_failed_records(workspace_temp_dir: Path) -> N
         store.close()
 
 
-def test_sequence_expand_stops_as_completed_when_probe_next_fails(workspace_temp_dir: Path) -> None:
+def test_sequence_expand_marks_completed_at_upper_bound_by_default(
+    workspace_temp_dir: Path,
+) -> None:
     cfg = _config(workspace_temp_dir)
+    html_by_url = {
+        "https://example.test/gallery/1.html": _html_for_sequence(
+            6,
+            "https://img.test/x/001.jpg",
+            "https://img.test/x/002.jpg",
+            "https://img.test/x/003.jpg",
+        ),
+    }
+    store = StateStore(cfg.state_db)
+    try:
+        pipeline = ImageHarvesterPipeline(
+            config=cfg,
+            store=store,
+            fetcher=FakeFetcher(html_by_url),
+            downloader=FailOneDownloader("/007.jpg"),
+        )
+        job_id = compute_job_id(cfg)
+        summary = pipeline.run(job_id=job_id, config_json=run_config_json(cfg))
+        assert summary["images"]["completed_images"] == 6
+        page = store.get_page(job_id, 1)
+        assert page is not None
+        assert page.status == "completed"
+        events = store.list_events(job_id, limit=50)
+        assert not any(e["event_type"].startswith("sequence_probe_") for e in events)
+    finally:
+        store.close()
+
+
+def test_sequence_expand_can_probe_after_upper_bound_when_enabled(
+    workspace_temp_dir: Path,
+) -> None:
+    cfg = _config(workspace_temp_dir, sequence_probe_after_upper_bound=True)
     html_by_url = {
         "https://example.test/gallery/1.html": _html_for_sequence(
             6,

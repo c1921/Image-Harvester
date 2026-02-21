@@ -25,6 +25,7 @@ FORM_DEFAULTS: dict[str, Any] = {
     "playwright_fallback": False,
     "sequence_count_selector": "#tishi p span",
     "sequence_require_upper_bound": True,
+    "sequence_probe_after_upper_bound": False,
 }
 
 
@@ -55,6 +56,7 @@ def payload_from_run_config(run_config: RunConfig) -> dict[str, object]:
         "playwright_fallback": run_config.playwright_fallback,
         "sequence_count_selector": run_config.sequence_count_selector,
         "sequence_require_upper_bound": run_config.sequence_require_upper_bound,
+        "sequence_probe_after_upper_bound": run_config.sequence_probe_after_upper_bound,
     }
 
 
@@ -94,6 +96,11 @@ def build_run_config_from_form(payload: Mapping[str, object]) -> RunConfig:
         payload,
         "sequence_require_upper_bound",
         bool(FORM_DEFAULTS["sequence_require_upper_bound"]),
+    )
+    raw["sequence_probe_after_upper_bound"] = _bool_or_default(
+        payload,
+        "sequence_probe_after_upper_bound",
+        bool(FORM_DEFAULTS["sequence_probe_after_upper_bound"]),
     )
     return build_run_config(raw)
 
@@ -229,6 +236,11 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                 value=bool(defaults["sequence_require_upper_bound"]),
                 id="sequence_require_upper_bound",
             )
+            yield Checkbox(
+                "到达上限后继续探索 sequence_probe_after_upper_bound",
+                value=bool(defaults["sequence_probe_after_upper_bound"]),
+                id="sequence_probe_after_upper_bound",
+            )
             yield Button("开始任务", id="start-run", variant="primary")
             yield Static("", id="run-form-status")
             yield Static("", id="run-form-error")
@@ -259,6 +271,10 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                 "sequence_count_selector": self.query_one("#sequence_count_selector", Input).value,
                 "sequence_require_upper_bound": self.query_one(
                     "#sequence_require_upper_bound",
+                    Checkbox,
+                ).value,
+                "sequence_probe_after_upper_bound": self.query_one(
+                    "#sequence_probe_after_upper_bound",
                     Checkbox,
                 ).value,
             }
@@ -311,6 +327,10 @@ try:  # pragma: no cover - UI class is covered by manual interaction
             self.query_one("#sequence_require_upper_bound", Checkbox).value = _coerce_bool(
                 payload.get("sequence_require_upper_bound"),
                 bool(FORM_DEFAULTS["sequence_require_upper_bound"]),
+            )
+            self.query_one("#sequence_probe_after_upper_bound", Checkbox).value = _coerce_bool(
+                payload.get("sequence_probe_after_upper_bound"),
+                bool(FORM_DEFAULTS["sequence_probe_after_upper_bound"]),
             )
 
         def state_db_path_text(self) -> str:
