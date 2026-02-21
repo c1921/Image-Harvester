@@ -238,9 +238,13 @@ class SnapshotService:
             if store.get_job(job_id) is None:
                 return None
             stats = store.stats_for_job(job_id)
-            events = list(reversed(store.list_events(job_id, limit=events_limit)))
+            events = store.list_events(job_id, limit=events_limit)
             failed = store.get_failed_images(job_id, limit=failed_limit)
-            pages = store.list_pages(job_id)
+            pages = sorted(
+                store.list_pages(job_id),
+                key=lambda page: (page.updated_at or "", page.page_num),
+                reverse=True,
+            )
         return JobSnapshot(
             job_id=job_id,
             stats=stats,

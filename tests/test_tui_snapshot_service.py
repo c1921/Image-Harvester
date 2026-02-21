@@ -60,18 +60,20 @@ class AlwaysSuccessDownloader:
         )
 
 
-def _config(tmp_path: Path) -> RunConfig:
-    return RunConfig(
-        url_template="https://example.test/gallery/{num}.html",
-        start_num=1,
-        end_num=1,
-        output_dir=tmp_path / "downloads",
-        state_db=tmp_path / "state.sqlite3",
-        request_delay_sec=0.0,
-        page_retries=0,
-        image_retries=0,
-        sequence_expand_enabled=False,
-    )
+def _config(tmp_path: Path, **overrides: object) -> RunConfig:
+    payload: dict[str, object] = {
+        "url_template": "https://example.test/gallery/{num}.html",
+        "start_num": 1,
+        "end_num": 1,
+        "output_dir": tmp_path / "downloads",
+        "state_db": tmp_path / "state.sqlite3",
+        "request_delay_sec": 0.0,
+        "page_retries": 0,
+        "image_retries": 0,
+        "sequence_expand_enabled": False,
+    }
+    payload.update(overrides)
+    return RunConfig(**payload)
 
 
 def _html_for(*images: str) -> str:
@@ -109,6 +111,41 @@ def test_snapshot_service_reads_stats_events_and_pages(workspace_temp_dir: Path)
     assert snapshot.stats["images"]["completed_images"] == 1
     assert len(snapshot.pages) == 1
     assert any(item["event_type"] == "job_start" for item in snapshot.events)
+
+
+def test_snapshot_service_orders_pages_and_events_desc(workspace_temp_dir: Path) -> None:
+    cfg = _config(workspace_temp_dir, end_num=2)
+    html_by_url = {
+        "https://example.test/gallery/1.html": _html_for("https://img.test/1.jpg"),
+        "https://example.test/gallery/2.html": _html_for("https://img.test/2.jpg"),
+    }
+    job_id = compute_job_id(cfg)
+
+    store = StateStore(cfg.state_db)
+    try:
+        pipeline = ImageHarvesterPipeline(
+            config=cfg,
+            store=store,
+            fetcher=FakeFetcher(html_by_url),
+            downloader=AlwaysSuccessDownloader(),
+        )
+        pipeline.run(job_id=job_id, config_json=run_config_json(cfg))
+
+        page1 = store.get_page(job_id, 1)
+        assert page1 is not None
+        store.update_page(page1.id, status=page1.status, error=page1.error)
+
+        store.add_event(job_id, "custom_old", "old")
+        store.add_event(job_id, "custom_new", "new")
+    finally:
+        store.close()
+
+    service = SnapshotService(cfg.state_db)
+    snapshot = service.get_snapshot(job_id, events_limit=20, failed_limit=20)
+    assert snapshot is not None
+    assert [page.page_num for page in snapshot.pages] == [1, 2]
+    assert snapshot.events[0]["event_type"] == "custom_new"
+    assert snapshot.events[1]["event_type"] == "custom_old"
 
 
 def test_snapshot_service_can_load_run_config_from_job(workspace_temp_dir: Path) -> None:
