@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,18 +14,47 @@ from .models import ImageRecord, JobState, PageState, utc_now_iso
 class StateStore:
     """Persistence layer for resumable harvesting jobs."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        batch_size: int = 1,
+        flush_interval_ms: int = 0,
+    ) -> None:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.db_path))
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON;")
-        self._init_schema()
+        self._lock = threading.RLock()
+        self._batch_size = 1
+        self._flush_interval_sec = 0.0
+        self._pending_writes = 0
+        self._last_commit_ts = time.monotonic()
+
+        with self._lock:
+            self.conn.execute("PRAGMA journal_mode = WAL;")
+            self.conn.execute("PRAGMA synchronous = NORMAL;")
+            self.conn.execute("PRAGMA foreign_keys = ON;")
+            self._init_schema_locked()
+            self.set_write_batching(batch_size=batch_size, flush_interval_ms=flush_interval_ms)
 
     def close(self) -> None:
-        self.conn.close()
+        with self._lock:
+            self._commit_locked()
+            self.conn.close()
 
-    def _init_schema(self) -> None:
+    def set_write_batching(self, *, batch_size: int, flush_interval_ms: int) -> None:
+        with self._lock:
+            self._batch_size = max(1, int(batch_size))
+            self._flush_interval_sec = max(0.0, float(flush_interval_ms) / 1000.0)
+            if self._batch_size == 1:
+                self._commit_locked()
+
+    def flush(self) -> None:
+        with self._lock:
+            self._commit_locked()
+
+    def _init_schema_locked(self) -> None:
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS jobs (
@@ -88,52 +119,84 @@ class StateStore:
             CREATE INDEX IF NOT EXISTS idx_events_job_id ON events(job_id);
             """
         )
+        self._commit_locked()
+
+    def _mark_write_locked(self) -> None:
+        self._pending_writes += 1
+        if self._batch_size <= 1:
+            self._commit_locked()
+            return
+        if self._pending_writes >= self._batch_size:
+            self._commit_locked()
+            return
+        if self._flush_interval_sec > 0:
+            now = time.monotonic()
+            if (now - self._last_commit_ts) >= self._flush_interval_sec:
+                self._commit_locked()
+
+    def _commit_locked(self) -> None:
         self.conn.commit()
+        self._pending_writes = 0
+        self._last_commit_ts = time.monotonic()
+
+    def _flush_on_read_if_due_locked(self) -> None:
+        if self._pending_writes <= 0:
+            return
+        if self._flush_interval_sec <= 0:
+            return
+        now = time.monotonic()
+        if (now - self._last_commit_ts) >= self._flush_interval_sec:
+            self._commit_locked()
 
     def reset_job(self, job_id: str, config_json: str) -> None:
         """Delete previous state for a stable job id and recreate root record."""
         now = utc_now_iso()
-        self.conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
-        self.conn.execute(
-            """
-            INSERT INTO jobs (job_id, status, config_json, started_at, updated_at, finished_at)
-            VALUES (?, 'running', ?, ?, ?, NULL)
-            """,
-            (job_id, config_json, now, now),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
+            self.conn.execute(
+                """
+                INSERT INTO jobs (job_id, status, config_json, started_at, updated_at, finished_at)
+                VALUES (?, 'running', ?, ?, ?, NULL)
+                """,
+                (job_id, config_json, now, now),
+            )
+            self._mark_write_locked()
 
     def upsert_job(self, job_id: str, config_json: str, status: str) -> None:
         now = utc_now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO jobs (job_id, status, config_json, started_at, updated_at, finished_at)
-            VALUES (?, ?, ?, ?, ?, NULL)
-            ON CONFLICT(job_id) DO UPDATE SET
-              status = excluded.status,
-              config_json = excluded.config_json,
-              updated_at = excluded.updated_at
-            """,
-            (job_id, status, config_json, now, now),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO jobs (job_id, status, config_json, started_at, updated_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(job_id) DO UPDATE SET
+                  status = excluded.status,
+                  config_json = excluded.config_json,
+                  updated_at = excluded.updated_at
+                """,
+                (job_id, status, config_json, now, now),
+            )
+            self._mark_write_locked()
 
     def set_job_status(self, job_id: str, status: str, finish: bool = False) -> None:
         now = utc_now_iso()
-        self.conn.execute(
-            """
-            UPDATE jobs
-            SET status = ?,
-                updated_at = ?,
-                finished_at = CASE WHEN ? THEN ? ELSE finished_at END
-            WHERE job_id = ?
-            """,
-            (status, now, int(finish), now, job_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE jobs
+                SET status = ?,
+                    updated_at = ?,
+                    finished_at = CASE WHEN ? THEN ? ELSE finished_at END
+                WHERE job_id = ?
+                """,
+                (status, now, int(finish), now, job_id),
+            )
+            self._mark_write_locked()
 
     def get_job(self, job_id: str) -> JobState | None:
-        row = self.conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            row = self.conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
         if row is None:
             return None
         return JobState(
@@ -146,9 +209,11 @@ class StateStore:
         )
 
     def get_latest_job(self) -> JobState | None:
-        row = self.conn.execute(
-            "SELECT * FROM jobs ORDER BY started_at DESC LIMIT 1"
-        ).fetchone()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            row = self.conn.execute(
+                "SELECT * FROM jobs ORDER BY started_at DESC LIMIT 1"
+            ).fetchone()
         if row is None:
             return None
         return JobState(
@@ -161,7 +226,9 @@ class StateStore:
         )
 
     def list_jobs(self) -> list[JobState]:
-        rows = self.conn.execute("SELECT * FROM jobs ORDER BY started_at DESC").fetchall()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            rows = self.conn.execute("SELECT * FROM jobs ORDER BY started_at DESC").fetchall()
         return [
             JobState(
                 job_id=row["job_id"],
@@ -176,48 +243,55 @@ class StateStore:
 
     def ensure_page(self, job_id: str, page_num: int, page_url: str, source_id: str) -> PageState:
         now = utc_now_iso()
-        self.conn.execute(
-            """
-            INSERT INTO pages (
-              job_id, page_num, page_url, source_id, status,
-              last_completed_image_index, image_count, error, started_at, updated_at, finished_at
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO pages (
+                  job_id, page_num, page_url, source_id, status,
+                  last_completed_image_index, image_count, error, started_at, updated_at, finished_at
+                )
+                VALUES (?, ?, ?, ?, 'pending', 0, 0, NULL, ?, ?, NULL)
+                ON CONFLICT(job_id, page_num) DO UPDATE SET
+                  page_url = excluded.page_url,
+                  source_id = excluded.source_id,
+                  updated_at = excluded.updated_at
+                """,
+                (job_id, page_num, page_url, source_id, now, now),
             )
-            VALUES (?, ?, ?, ?, 'pending', 0, 0, NULL, ?, ?, NULL)
-            ON CONFLICT(job_id, page_num) DO UPDATE SET
-              page_url = excluded.page_url,
-              source_id = excluded.source_id,
-              updated_at = excluded.updated_at
-            """,
-            (job_id, page_num, page_url, source_id, now, now),
-        )
-        self.conn.commit()
-        row = self.conn.execute(
-            "SELECT * FROM pages WHERE job_id = ? AND page_num = ?",
-            (job_id, page_num),
-        ).fetchone()
+            self._mark_write_locked()
+            row = self.conn.execute(
+                "SELECT * FROM pages WHERE job_id = ? AND page_num = ?",
+                (job_id, page_num),
+            ).fetchone()
         assert row is not None
         return self._row_to_page(row)
 
     def get_page(self, job_id: str, page_num: int) -> PageState | None:
-        row = self.conn.execute(
-            "SELECT * FROM pages WHERE job_id = ? AND page_num = ?",
-            (job_id, page_num),
-        ).fetchone()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            row = self.conn.execute(
+                "SELECT * FROM pages WHERE job_id = ? AND page_num = ?",
+                (job_id, page_num),
+            ).fetchone()
         if row is None:
             return None
         return self._row_to_page(row)
 
     def get_page_by_id(self, page_id: int) -> PageState | None:
-        row = self.conn.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            row = self.conn.execute("SELECT * FROM pages WHERE id = ?", (page_id,)).fetchone()
         if row is None:
             return None
         return self._row_to_page(row)
 
     def list_pages(self, job_id: str) -> list[PageState]:
-        rows = self.conn.execute(
-            "SELECT * FROM pages WHERE job_id = ? ORDER BY page_num",
-            (job_id,),
-        ).fetchall()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            rows = self.conn.execute(
+                "SELECT * FROM pages WHERE job_id = ? ORDER BY page_num",
+                (job_id,),
+            ).fetchall()
         return [self._row_to_page(row) for row in rows]
 
     def update_page(
@@ -231,29 +305,30 @@ class StateStore:
         finish: bool = False,
     ) -> None:
         now = utc_now_iso()
-        self.conn.execute(
-            """
-            UPDATE pages
-            SET status = ?,
-                last_completed_image_index = COALESCE(?, last_completed_image_index),
-                image_count = COALESCE(?, image_count),
-                error = ?,
-                updated_at = ?,
-                finished_at = CASE WHEN ? THEN ? ELSE finished_at END
-            WHERE id = ?
-            """,
-            (
-                status,
-                last_completed_image_index,
-                image_count,
-                error,
-                now,
-                int(finish),
-                now,
-                page_id,
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE pages
+                SET status = ?,
+                    last_completed_image_index = COALESCE(?, last_completed_image_index),
+                    image_count = COALESCE(?, image_count),
+                    error = ?,
+                    updated_at = ?,
+                    finished_at = CASE WHEN ? THEN ? ELSE finished_at END
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    last_completed_image_index,
+                    image_count,
+                    error,
+                    now,
+                    int(finish),
+                    now,
+                    page_id,
+                ),
+            )
+            self._mark_write_locked()
 
     def upsert_page_images(
         self,
@@ -261,35 +336,39 @@ class StateStore:
         items: list[tuple[int, str, str]],
     ) -> None:
         now = utc_now_iso()
-        self.conn.executemany(
-            """
-            INSERT INTO images (
-              page_id, image_index, url, local_path, status, retries, updated_at
+        with self._lock:
+            self.conn.executemany(
+                """
+                INSERT INTO images (
+                  page_id, image_index, url, local_path, status, retries, updated_at
+                )
+                VALUES (?, ?, ?, ?, 'pending', 0, ?)
+                ON CONFLICT(page_id, image_index) DO UPDATE SET
+                  url = excluded.url,
+                  local_path = excluded.local_path,
+                  updated_at = excluded.updated_at
+                """,
+                [(page_id, idx, url, local_path, now) for idx, url, local_path in items],
             )
-            VALUES (?, ?, ?, ?, 'pending', 0, ?)
-            ON CONFLICT(page_id, image_index) DO UPDATE SET
-              url = excluded.url,
-              local_path = excluded.local_path,
-              updated_at = excluded.updated_at
-            """,
-            [(page_id, idx, url, local_path, now) for idx, url, local_path in items],
-        )
-        self.conn.commit()
+            self._mark_write_locked()
 
     def get_page_images(self, page_id: int) -> list[ImageRecord]:
-        rows = self.conn.execute(
-            "SELECT * FROM images WHERE page_id = ? ORDER BY image_index",
-            (page_id,),
-        ).fetchall()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            rows = self.conn.execute(
+                "SELECT * FROM images WHERE page_id = ? ORDER BY image_index",
+                (page_id,),
+            ).fetchall()
         return [self._row_to_image(row) for row in rows]
 
     def update_image_running(self, image_id: int) -> None:
         now = utc_now_iso()
-        self.conn.execute(
-            "UPDATE images SET status = 'running', updated_at = ? WHERE id = ?",
-            (now, image_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                "UPDATE images SET status = 'running', updated_at = ? WHERE id = ?",
+                (now, image_id),
+            )
+            self._mark_write_locked()
 
     def update_image_result(
         self,
@@ -305,64 +384,67 @@ class StateStore:
         error: str | None,
     ) -> None:
         now = utc_now_iso()
-        self.conn.execute(
-            """
-            UPDATE images
-            SET status = ?,
-                retries = ?,
-                http_status = ?,
-                content_type = ?,
-                size_bytes = ?,
-                sha256 = ?,
-                downloaded_at = ?,
-                error = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                status,
-                retries,
-                http_status,
-                content_type,
-                size_bytes,
-                sha256,
-                downloaded_at,
-                error,
-                now,
-                image_id,
-            ),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE images
+                SET status = ?,
+                    retries = ?,
+                    http_status = ?,
+                    content_type = ?,
+                    size_bytes = ?,
+                    sha256 = ?,
+                    downloaded_at = ?,
+                    error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    retries,
+                    http_status,
+                    content_type,
+                    size_bytes,
+                    sha256,
+                    downloaded_at,
+                    error,
+                    now,
+                    image_id,
+                ),
+            )
+            self._mark_write_locked()
 
     def reset_running_to_pending(self, job_id: str) -> None:
         """Recover interrupted run by returning running rows back to pending."""
         now = utc_now_iso()
-        self.conn.execute(
-            """
-            UPDATE pages SET status = 'pending', updated_at = ?
-            WHERE job_id = ? AND status = 'running'
-            """,
-            (now, job_id),
-        )
-        self.conn.execute(
-            """
-            UPDATE images SET status = 'pending', updated_at = ?
-            WHERE page_id IN (SELECT id FROM pages WHERE job_id = ?)
-              AND status = 'running'
-            """,
-            (now, job_id),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                UPDATE pages SET status = 'pending', updated_at = ?
+                WHERE job_id = ? AND status = 'running'
+                """,
+                (now, job_id),
+            )
+            self.conn.execute(
+                """
+                UPDATE images SET status = 'pending', updated_at = ?
+                WHERE page_id IN (SELECT id FROM pages WHERE job_id = ?)
+                  AND status = 'running'
+                """,
+                (now, job_id),
+            )
+            self._mark_write_locked()
 
     def add_event(self, job_id: str, event_type: str, message: str, page_id: int | None = None) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO events (job_id, page_id, event_type, message, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (job_id, page_id, event_type, message, utc_now_iso()),
-        )
-        self.conn.commit()
+        with self._lock:
+            self.conn.execute(
+                """
+                INSERT INTO events (job_id, page_id, event_type, message, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (job_id, page_id, event_type, message, utc_now_iso()),
+            )
+            self._mark_write_locked()
 
     def get_failed_images(self, job_id: str, limit: int | None = None) -> list[dict[str, Any]]:
         query = """
@@ -376,35 +458,39 @@ class StateStore:
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
-        rows = self.conn.execute(query, params).fetchall()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            rows = self.conn.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
     def stats_for_job(self, job_id: str) -> dict[str, Any]:
         job = self.get_job(job_id)
         if job is None:
             raise ValueError(f"未找到任务: {job_id}")
-        page_totals = self.conn.execute(
-            """
-            SELECT
-              COUNT(*) AS total_pages,
-              SUM(CASE WHEN status IN ('completed', 'completed_with_failures') THEN 1 ELSE 0 END) AS done_pages,
-              SUM(CASE WHEN status = 'failed_fetch' THEN 1 ELSE 0 END) AS failed_pages,
-              SUM(CASE WHEN status = 'no_images' THEN 1 ELSE 0 END) AS empty_pages
-            FROM pages WHERE job_id = ?
-            """,
-            (job_id,),
-        ).fetchone()
-        image_totals = self.conn.execute(
-            """
-            SELECT
-              COUNT(*) AS total_images,
-              SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_images,
-              SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_images,
-              SUM(CASE WHEN status IN ('pending', 'running') THEN 1 ELSE 0 END) AS remaining_images
-            FROM images WHERE page_id IN (SELECT id FROM pages WHERE job_id = ?)
-            """,
-            (job_id,),
-        ).fetchone()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            page_totals = self.conn.execute(
+                """
+                SELECT
+                  COUNT(*) AS total_pages,
+                  SUM(CASE WHEN status IN ('completed', 'completed_with_failures') THEN 1 ELSE 0 END) AS done_pages,
+                  SUM(CASE WHEN status = 'failed_fetch' THEN 1 ELSE 0 END) AS failed_pages,
+                  SUM(CASE WHEN status = 'no_images' THEN 1 ELSE 0 END) AS empty_pages
+                FROM pages WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+            image_totals = self.conn.execute(
+                """
+                SELECT
+                  COUNT(*) AS total_images,
+                  SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_images,
+                  SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_images,
+                  SUM(CASE WHEN status IN ('pending', 'running') THEN 1 ELSE 0 END) AS remaining_images
+                FROM images WHERE page_id IN (SELECT id FROM pages WHERE job_id = ?)
+                """,
+                (job_id,),
+            ).fetchone()
         return {
             "job": {
                 "job_id": job.job_id,
@@ -418,15 +504,17 @@ class StateStore:
         }
 
     def list_events(self, job_id: str, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
-            """
-            SELECT id, page_id, event_type, message, created_at
-            FROM events WHERE job_id = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (job_id, limit),
-        ).fetchall()
+        with self._lock:
+            self._flush_on_read_if_due_locked()
+            rows = self.conn.execute(
+                """
+                SELECT id, page_id, event_type, message, created_at
+                FROM events WHERE job_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (job_id, limit),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def _row_to_page(self, row: sqlite3.Row) -> PageState:

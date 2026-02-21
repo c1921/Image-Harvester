@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 from .downloader import ImageDownloader, file_sha256
 from .fetchers.base import BaseFetcher
-from .models import FetchResult, GalleryPageMeta, RunConfig, utc_now_iso
+from .models import FetchResult, GalleryPageMeta, ImageRecord, RunConfig, utc_now_iso
 from .naming import image_file_name, page_dir_name, source_id_from_page_url
 from .parser import parse_gallery_upper_bound, parse_image_urls
 from .sequence import build_sequence_url, extract_sequence_seed
@@ -32,11 +35,22 @@ class ImageHarvesterPipeline:
         self.store = store
         self.fetcher = fetcher
         self.fallback_fetcher = fallback_fetcher
-        self.downloader = downloader or ImageDownloader()
+        self.downloader = downloader or ImageDownloader(
+            max_requests_per_sec=config.max_requests_per_sec,
+            max_burst=config.max_burst,
+            backoff_base_sec=config.backoff_base_sec,
+            backoff_max_sec=config.backoff_max_sec,
+        )
+        self._fetch_lock = threading.Lock()
+        self._image_executor: ThreadPoolExecutor | None = None
 
     def run(self, job_id: str, config_json: str) -> dict[str, Any]:
         """Run main harvesting flow."""
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
+        self.store.set_write_batching(
+            batch_size=self.config.db_batch_size,
+            flush_interval_ms=self.config.db_flush_interval_ms,
+        )
 
         if self.config.resume:
             self.store.upsert_job(job_id, config_json, "running")
@@ -45,58 +59,111 @@ class ImageHarvesterPipeline:
             self.store.reset_job(job_id, config_json)
 
         self.store.add_event(job_id, "job_start", "任务开始")
-        consecutive_page_failures = 0
-        page_num = self.config.start_num
 
         try:
-            while True:
-                if self.config.end_num is not None and page_num > self.config.end_num:
-                    break
+            with ThreadPoolExecutor(
+                max_workers=max(1, self.config.image_workers),
+                thread_name_prefix="harvester-image",
+            ) as image_executor:
+                self._image_executor = image_executor
+                if self._should_use_parallel_pages():
+                    self._run_parallel_pages(job_id)
+                else:
+                    self._run_sequential_pages(job_id)
 
+            self.store.set_job_status(job_id, "completed", finish=True)
+            self.store.add_event(job_id, "job_end", "任务完成")
+            self.store.flush()
+            return self.store.stats_for_job(job_id)
+        except Exception as exc:
+            self.store.set_job_status(job_id, "failed", finish=True)
+            self.store.add_event(job_id, "job_failed", f"未处理异常: {exc}")
+            self.store.flush()
+            raise
+        finally:
+            self._image_executor = None
+
+    def _should_use_parallel_pages(self) -> bool:
+        if self.config.end_num is None:
+            return False
+        if self.config.page_workers <= 1:
+            return False
+        if self.config.engine == "playwright":
+            return False
+        if self.fallback_fetcher is not None:
+            return False
+        return True
+
+    def _run_parallel_pages(self, job_id: str) -> None:
+        assert self.config.end_num is not None
+        with ThreadPoolExecutor(
+            max_workers=max(1, self.config.page_workers),
+            thread_name_prefix="harvester-page",
+        ) as page_executor:
+            future_map: dict[Future[bool], int] = {}
+            for page_num in range(self.config.start_num, self.config.end_num + 1):
                 page_url = self.config.url_template.format(num=page_num)
                 source_id = source_id_from_page_url(page_url, page_num)
                 page_state = self.store.ensure_page(job_id, page_num, page_url, source_id)
-
                 if self.config.resume and page_state.status in {
                     "completed",
                     "completed_with_failures",
                     "no_images",
                 }:
-                    page_num += 1
                     continue
-
-                page_ok = self._process_page(job_id=job_id, page_num=page_num, page_url=page_url)
-                if page_ok:
-                    consecutive_page_failures = 0
-                else:
-                    consecutive_page_failures += 1
-
-                if (
-                    self.config.end_num is None
-                    and consecutive_page_failures
-                    >= self.config.stop_after_consecutive_page_failures
-                ):
-                    self.store.add_event(
-                        job_id,
-                        "stop_threshold",
-                        (
-                            "因连续页面失败而停止: "
-                            f"{consecutive_page_failures}"
-                        ),
-                    )
-                    break
-
-                page_num += 1
+                future = page_executor.submit(
+                    self._process_page,
+                    job_id=job_id,
+                    page_num=page_num,
+                    page_url=page_url,
+                )
+                future_map[future] = page_num
                 if self.config.request_delay_sec > 0:
                     time.sleep(self.config.request_delay_sec)
 
-            self.store.set_job_status(job_id, "completed", finish=True)
-            self.store.add_event(job_id, "job_end", "任务完成")
-            return self.store.stats_for_job(job_id)
-        except Exception as exc:
-            self.store.set_job_status(job_id, "failed", finish=True)
-            self.store.add_event(job_id, "job_failed", f"未处理异常: {exc}")
-            raise
+            for future in as_completed(future_map):
+                future.result()
+
+    def _run_sequential_pages(self, job_id: str) -> None:
+        consecutive_page_failures = 0
+        page_num = self.config.start_num
+
+        while True:
+            if self.config.end_num is not None and page_num > self.config.end_num:
+                break
+
+            page_url = self.config.url_template.format(num=page_num)
+            source_id = source_id_from_page_url(page_url, page_num)
+            page_state = self.store.ensure_page(job_id, page_num, page_url, source_id)
+
+            if self.config.resume and page_state.status in {
+                "completed",
+                "completed_with_failures",
+                "no_images",
+            }:
+                page_num += 1
+                continue
+
+            page_ok = self._process_page(job_id=job_id, page_num=page_num, page_url=page_url)
+            if page_ok:
+                consecutive_page_failures = 0
+            else:
+                consecutive_page_failures += 1
+
+            if (
+                self.config.end_num is None
+                and consecutive_page_failures >= self.config.stop_after_consecutive_page_failures
+            ):
+                self.store.add_event(
+                    job_id,
+                    "stop_threshold",
+                    f"因连续页面失败而停止: {consecutive_page_failures}",
+                )
+                break
+
+            page_num += 1
+            if self.config.request_delay_sec > 0:
+                time.sleep(self.config.request_delay_sec)
 
     def retry_failed(
         self,
@@ -118,43 +185,107 @@ class ImageHarvesterPipeline:
         failed_again = 0
         touched_pages: set[int] = set()
 
-        for row in failed_images:
-            retried += 1
-            touched_pages.add(int(row["page_id"]))
-            image_path = Path(str(row["local_path"]))
-            result = self.downloader.download(
-                url=str(row["url"]),
-                destination=image_path,
-                timeout_sec=timeout,
-                retries=retry_count,
-                delay_sec=delay,
+        if not failed_images:
+            self.store.add_event(
+                job_id,
+                "retry_failed",
+                "重试失败图片完成: retried=0, recovered=0, failed_again=0",
             )
-            if result.ok:
-                recovered += 1
-                self.store.update_image_result(
-                    int(row["id"]),
-                    status="completed",
-                    retries=result.retries_used,
-                    http_status=result.http_status,
-                    content_type=result.content_type,
-                    size_bytes=result.size_bytes,
-                    sha256=result.sha256,
-                    downloaded_at=result.downloaded_at,
-                    error=None,
+            self.store.flush()
+            return {
+                "retried": retried,
+                "recovered": recovered,
+                "failed_again": failed_again,
+            }
+
+        max_workers = max(1, self.config.image_workers)
+        if max_workers == 1:
+            for row in failed_images:
+                retried += 1
+                touched_pages.add(int(row["page_id"]))
+                image_path = Path(str(row["local_path"]))
+                result = self.downloader.download(
+                    url=str(row["url"]),
+                    destination=image_path,
+                    timeout_sec=timeout,
+                    retries=retry_count,
+                    delay_sec=delay,
                 )
-            else:
-                failed_again += 1
-                self.store.update_image_result(
-                    int(row["id"]),
-                    status="failed",
-                    retries=result.retries_used,
-                    http_status=result.http_status,
-                    content_type=result.content_type,
-                    size_bytes=result.size_bytes,
-                    sha256=result.sha256,
-                    downloaded_at=result.downloaded_at,
-                    error=result.error,
-                )
+                if result.ok:
+                    recovered += 1
+                    self.store.update_image_result(
+                        int(row["id"]),
+                        status="completed",
+                        retries=result.retries_used,
+                        http_status=result.http_status,
+                        content_type=result.content_type,
+                        size_bytes=result.size_bytes,
+                        sha256=result.sha256,
+                        downloaded_at=result.downloaded_at,
+                        error=None,
+                    )
+                else:
+                    failed_again += 1
+                    self.store.update_image_result(
+                        int(row["id"]),
+                        status="failed",
+                        retries=result.retries_used,
+                        http_status=result.http_status,
+                        content_type=result.content_type,
+                        size_bytes=result.size_bytes,
+                        sha256=result.sha256,
+                        downloaded_at=result.downloaded_at,
+                        error=result.error,
+                    )
+        else:
+            with ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="harvester-retry",
+            ) as retry_executor:
+                future_map: dict[Future[Any], dict[str, Any]] = {}
+                for row in failed_images:
+                    retried += 1
+                    touched_pages.add(int(row["page_id"]))
+                    image_path = Path(str(row["local_path"]))
+                    future = retry_executor.submit(
+                        self.downloader.download,
+                        str(row["url"]),
+                        image_path,
+                        timeout,
+                        retry_count,
+                        delay,
+                    )
+                    future_map[future] = row
+
+                for future in as_completed(future_map):
+                    row = future_map[future]
+                    result = future.result()
+                    if result.ok:
+                        recovered += 1
+                        self.store.update_image_result(
+                            int(row["id"]),
+                            status="completed",
+                            retries=result.retries_used,
+                            http_status=result.http_status,
+                            content_type=result.content_type,
+                            size_bytes=result.size_bytes,
+                            sha256=result.sha256,
+                            downloaded_at=result.downloaded_at,
+                            error=None,
+                        )
+                    else:
+                        failed_again += 1
+                        self.store.update_image_result(
+                            int(row["id"]),
+                            status="failed",
+                            retries=result.retries_used,
+                            http_status=result.http_status,
+                            content_type=result.content_type,
+                            size_bytes=result.size_bytes,
+                            sha256=result.sha256,
+                            downloaded_at=result.downloaded_at,
+                            error=result.error,
+                        )
 
         for page_id in touched_pages:
             self._refresh_page_status(page_id)
@@ -168,6 +299,7 @@ class ImageHarvesterPipeline:
                 f"retried={retried}, recovered={recovered}, failed_again={failed_again}"
             ),
         )
+        self.store.flush()
 
         return {
             "retried": retried,
@@ -342,84 +474,13 @@ class ImageHarvesterPipeline:
 
         self.store.upsert_page_images(page_state.id, tuples)
         self.store.update_page(page_state.id, status="running", image_count=len(tuples))
-        page_images = self.store.get_page_images(page_state.id)
-        sequence_incomplete = False
-
-        for image in page_images:
-            if image.status in {"completed", "failed"}:
-                continue
-            destination = Path(image.local_path)
-
-            if destination.exists() and destination.is_file() and destination.stat().st_size > 0:
-                self.store.update_image_result(
-                    image.id,
-                    status="completed",
-                    retries=image.retries,
-                    http_status=200,
-                    content_type=None,
-                    size_bytes=destination.stat().st_size,
-                    sha256=file_sha256(destination),
-                    downloaded_at=utc_now_iso(),
-                    error=None,
-                )
-                self.store.update_page(
-                    page_state.id,
-                    status="running",
-                    last_completed_image_index=image.image_index,
-                    image_count=len(tuples),
-                )
-                continue
-
-            self.store.update_image_running(image.id)
-            result = self.downloader.download(
-                url=image.url,
-                destination=destination,
-                timeout_sec=self.config.image_timeout_sec,
-                retries=self.config.image_retries,
-                delay_sec=self.config.request_delay_sec,
-            )
-
-            if result.ok:
-                self.store.update_image_result(
-                    image.id,
-                    status="completed",
-                    retries=result.retries_used,
-                    http_status=result.http_status,
-                    content_type=result.content_type,
-                    size_bytes=result.size_bytes,
-                    sha256=result.sha256,
-                    downloaded_at=result.downloaded_at,
-                    error=None,
-                )
-                self.store.update_page(
-                    page_state.id,
-                    status="running",
-                    last_completed_image_index=image.image_index,
-                    image_count=len(tuples),
-                )
-            else:
-                self.store.update_image_result(
-                    image.id,
-                    status="failed",
-                    retries=result.retries_used,
-                    http_status=result.http_status,
-                    content_type=result.content_type,
-                    size_bytes=result.size_bytes,
-                    sha256=result.sha256,
-                    downloaded_at=result.downloaded_at,
-                    error=result.error,
-                )
-                self.store.add_event(
-                    job_id,
-                    "image_failed",
-                    (
-                        f"页面 {page_num} 第 {image.image_index} 张图片重试后仍失败: "
-                        f"{result.error}"
-                    ),
-                    page_id=page_state.id,
-                )
-                sequence_incomplete = True
-                break
+        sequence_incomplete = self._download_images_for_page(
+            job_id=job_id,
+            page_id=page_state.id,
+            page_num=page_num,
+            image_count=len(tuples),
+            sequence_upper_bound=sequence_upper_bound,
+        )
 
         if not sequence_incomplete:
             sequence_incomplete = any(
@@ -471,6 +532,184 @@ class ImageHarvesterPipeline:
         page_state_after = self.store.get_page(job_id, page_num)
         assert page_state_after is not None
         return page_state_after.status in {"completed", "completed_with_failures"}
+
+    def _download_images_for_page(
+        self,
+        *,
+        job_id: str,
+        page_id: int,
+        page_num: int,
+        image_count: int,
+        sequence_upper_bound: int,
+    ) -> bool:
+        page_images = self.store.get_page_images(page_id)
+        max_completed_idx = max(
+            (img.image_index for img in page_images if img.status == "completed"),
+            default=0,
+        )
+        sequence_incomplete = any(
+            img.status == "failed" and img.image_index <= sequence_upper_bound
+            for img in page_images
+        )
+
+        if not self.config.continue_on_image_failure:
+            for image in page_images:
+                if image.status in {"completed", "failed"}:
+                    continue
+                destination = Path(image.local_path)
+
+                if destination.exists() and destination.is_file() and destination.stat().st_size > 0:
+                    self.store.update_image_result(
+                        image.id,
+                        status="completed",
+                        retries=image.retries,
+                        http_status=200,
+                        content_type=None,
+                        size_bytes=destination.stat().st_size,
+                        sha256=file_sha256(destination),
+                        downloaded_at=utc_now_iso(),
+                        error=None,
+                    )
+                    max_completed_idx = max(max_completed_idx, image.image_index)
+                    continue
+
+                self.store.update_image_running(image.id)
+                result = self.downloader.download(
+                    url=image.url,
+                    destination=destination,
+                    timeout_sec=self.config.image_timeout_sec,
+                    retries=self.config.image_retries,
+                    delay_sec=self.config.request_delay_sec,
+                )
+                if result.ok:
+                    self.store.update_image_result(
+                        image.id,
+                        status="completed",
+                        retries=result.retries_used,
+                        http_status=result.http_status,
+                        content_type=result.content_type,
+                        size_bytes=result.size_bytes,
+                        sha256=result.sha256,
+                        downloaded_at=result.downloaded_at,
+                        error=None,
+                    )
+                    max_completed_idx = max(max_completed_idx, image.image_index)
+                else:
+                    self.store.update_image_result(
+                        image.id,
+                        status="failed",
+                        retries=result.retries_used,
+                        http_status=result.http_status,
+                        content_type=result.content_type,
+                        size_bytes=result.size_bytes,
+                        sha256=result.sha256,
+                        downloaded_at=result.downloaded_at,
+                        error=result.error,
+                    )
+                    self.store.add_event(
+                        job_id,
+                        "image_failed",
+                        (
+                            f"页面 {page_num} 第 {image.image_index} 张图片重试后仍失败: "
+                            f"{result.error}"
+                        ),
+                        page_id=page_id,
+                    )
+                    sequence_incomplete = True
+                    break
+        else:
+            pending_images: list[ImageRecord] = []
+            for image in page_images:
+                if image.status in {"completed", "failed"}:
+                    continue
+                destination = Path(image.local_path)
+                if destination.exists() and destination.is_file() and destination.stat().st_size > 0:
+                    self.store.update_image_result(
+                        image.id,
+                        status="completed",
+                        retries=image.retries,
+                        http_status=200,
+                        content_type=None,
+                        size_bytes=destination.stat().st_size,
+                        sha256=file_sha256(destination),
+                        downloaded_at=utc_now_iso(),
+                        error=None,
+                    )
+                    max_completed_idx = max(max_completed_idx, image.image_index)
+                    continue
+                self.store.update_image_running(image.id)
+                pending_images.append(image)
+
+            for image, result in self._download_parallel(pending_images):
+                if result.ok:
+                    self.store.update_image_result(
+                        image.id,
+                        status="completed",
+                        retries=result.retries_used,
+                        http_status=result.http_status,
+                        content_type=result.content_type,
+                        size_bytes=result.size_bytes,
+                        sha256=result.sha256,
+                        downloaded_at=result.downloaded_at,
+                        error=None,
+                    )
+                    max_completed_idx = max(max_completed_idx, image.image_index)
+                else:
+                    self.store.update_image_result(
+                        image.id,
+                        status="failed",
+                        retries=result.retries_used,
+                        http_status=result.http_status,
+                        content_type=result.content_type,
+                        size_bytes=result.size_bytes,
+                        sha256=result.sha256,
+                        downloaded_at=result.downloaded_at,
+                        error=result.error,
+                    )
+                    self.store.add_event(
+                        job_id,
+                        "image_failed",
+                        (
+                            f"页面 {page_num} 第 {image.image_index} 张图片重试后仍失败: "
+                            f"{result.error}"
+                        ),
+                        page_id=page_id,
+                    )
+                    sequence_incomplete = True
+
+        self.store.update_page(
+            page_id,
+            status="running",
+            last_completed_image_index=max_completed_idx,
+            image_count=image_count,
+        )
+        return sequence_incomplete
+
+    def _download_parallel(self, images: list[ImageRecord]) -> list[tuple[ImageRecord, Any]]:
+        if not images:
+            return []
+        if self._image_executor is None or self.config.image_workers <= 1:
+            return [(image, self._download_one(image)) for image in images]
+
+        future_map: dict[Future[Any], ImageRecord] = {}
+        for image in images:
+            future = self._image_executor.submit(self._download_one, image)
+            future_map[future] = image
+
+        completed: list[tuple[ImageRecord, Any]] = []
+        for future in as_completed(future_map):
+            image = future_map[future]
+            completed.append((image, future.result()))
+        return completed
+
+    def _download_one(self, image: ImageRecord) -> Any:
+        return self.downloader.download(
+            url=image.url,
+            destination=Path(image.local_path),
+            timeout_sec=self.config.image_timeout_sec,
+            retries=self.config.image_retries,
+            delay_sec=self.config.request_delay_sec,
+        )
 
     def _build_sequence_tuples(
         self,
@@ -566,11 +805,18 @@ class ImageHarvesterPipeline:
         attempts = retries + 1
         result: FetchResult | None = None
         for attempt in range(1, attempts + 1):
-            result = fetcher.fetch(url, timeout_sec=self.config.page_timeout_sec)
+            with self._fetch_lock:
+                result = fetcher.fetch(url, timeout_sec=self.config.page_timeout_sec)
             if result.ok and result.html:
                 return result
-            if attempt < attempts and self.config.request_delay_sec > 0:
-                time.sleep(self.config.request_delay_sec)
+            if attempt < attempts:
+                delay = self.config.request_delay_sec
+                if result.status_code in {429, 503}:
+                    base = max(delay, self.config.backoff_base_sec)
+                    delay = min(self.config.backoff_max_sec, base * (2 ** (attempt - 1)))
+                    delay *= random.uniform(0.8, 1.2)
+                if delay > 0:
+                    time.sleep(delay)
         assert result is not None
         return result
 

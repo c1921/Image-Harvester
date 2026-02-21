@@ -36,11 +36,20 @@ def build_run_config(raw: dict[str, Any]) -> RunConfig:
         state_db=Path(raw.get("state_db", "data/state.sqlite3")),
         engine=str(raw.get("engine", "requests")).lower(),
         resume=bool(raw.get("resume", True)),
-        page_timeout_sec=float(raw.get("page_timeout_sec", 20.0)),
-        image_timeout_sec=float(raw.get("image_timeout_sec", 30.0)),
-        image_retries=int(raw.get("image_retries", 3)),
-        page_retries=int(raw.get("page_retries", 2)),
-        request_delay_sec=float(raw.get("request_delay_sec", 0.2)),
+        page_timeout_sec=float(raw.get("page_timeout_sec", 12.0)),
+        image_timeout_sec=float(raw.get("image_timeout_sec", 18.0)),
+        image_retries=int(raw.get("image_retries", 2)),
+        page_retries=int(raw.get("page_retries", 1)),
+        request_delay_sec=float(raw.get("request_delay_sec", 0.0)),
+        page_workers=int(raw.get("page_workers", 4)),
+        image_workers=int(raw.get("image_workers", 48)),
+        max_requests_per_sec=float(raw.get("max_requests_per_sec", 80.0)),
+        max_burst=int(raw.get("max_burst", 120)),
+        backoff_base_sec=float(raw.get("backoff_base_sec", 0.5)),
+        backoff_max_sec=float(raw.get("backoff_max_sec", 8.0)),
+        db_batch_size=int(raw.get("db_batch_size", 300)),
+        db_flush_interval_ms=int(raw.get("db_flush_interval_ms", 200)),
+        continue_on_image_failure=bool(raw.get("continue_on_image_failure", True)),
         stop_after_consecutive_page_failures=int(
             raw.get("stop_after_consecutive_page_failures", 5)
         ),
@@ -69,6 +78,24 @@ def validate_run_config(config: RunConfig) -> None:
         raise ValueError("image_retries 必须 >= 0")
     if config.page_retries < 0:
         raise ValueError("page_retries 必须 >= 0")
+    if config.request_delay_sec < 0:
+        raise ValueError("request_delay_sec 必须 >= 0")
+    if config.page_workers < 1:
+        raise ValueError("page_workers 必须 >= 1")
+    if config.image_workers < 1:
+        raise ValueError("image_workers 必须 >= 1")
+    if config.max_requests_per_sec <= 0:
+        raise ValueError("max_requests_per_sec 必须 > 0")
+    if config.max_burst < 1:
+        raise ValueError("max_burst 必须 >= 1")
+    if config.backoff_base_sec < 0:
+        raise ValueError("backoff_base_sec 必须 >= 0")
+    if config.backoff_max_sec < config.backoff_base_sec:
+        raise ValueError("backoff_max_sec 必须 >= backoff_base_sec")
+    if config.db_batch_size < 1:
+        raise ValueError("db_batch_size 必须 >= 1")
+    if config.db_flush_interval_ms < 0:
+        raise ValueError("db_flush_interval_ms 必须 >= 0")
     if config.stop_after_consecutive_page_failures < 1:
         raise ValueError("stop_after_consecutive_page_failures 必须 >= 1")
     if not config.selector.strip():
@@ -100,6 +127,15 @@ def run_config_json(config: RunConfig) -> str:
         "image_retries": config.image_retries,
         "page_retries": config.page_retries,
         "request_delay_sec": config.request_delay_sec,
+        "page_workers": config.page_workers,
+        "image_workers": config.image_workers,
+        "max_requests_per_sec": config.max_requests_per_sec,
+        "max_burst": config.max_burst,
+        "backoff_base_sec": config.backoff_base_sec,
+        "backoff_max_sec": config.backoff_max_sec,
+        "db_batch_size": config.db_batch_size,
+        "db_flush_interval_ms": config.db_flush_interval_ms,
+        "continue_on_image_failure": config.continue_on_image_failure,
         "stop_after_consecutive_page_failures": config.stop_after_consecutive_page_failures,
         "playwright_fallback": config.playwright_fallback,
         "sequence_count_selector": config.sequence_count_selector,

@@ -16,11 +16,20 @@ FORM_DEFAULTS: dict[str, Any] = {
     "state_db": "data/state.sqlite3",
     "engine": "requests",
     "resume": True,
-    "page_timeout_sec": "20.0",
-    "image_timeout_sec": "30.0",
-    "image_retries": "3",
-    "page_retries": "2",
-    "request_delay_sec": "0.2",
+    "page_timeout_sec": "12.0",
+    "image_timeout_sec": "18.0",
+    "image_retries": "2",
+    "page_retries": "1",
+    "request_delay_sec": "0.0",
+    "page_workers": "4",
+    "image_workers": "48",
+    "max_requests_per_sec": "80.0",
+    "max_burst": "120",
+    "backoff_base_sec": "0.5",
+    "backoff_max_sec": "8.0",
+    "db_batch_size": "300",
+    "db_flush_interval_ms": "200",
+    "continue_on_image_failure": True,
     "stop_after_consecutive_page_failures": "5",
     "playwright_fallback": False,
     "sequence_count_selector": "#tishi p span",
@@ -50,6 +59,15 @@ def payload_from_run_config(run_config: RunConfig) -> dict[str, object]:
         "image_retries": str(run_config.image_retries),
         "page_retries": str(run_config.page_retries),
         "request_delay_sec": str(run_config.request_delay_sec),
+        "page_workers": str(run_config.page_workers),
+        "image_workers": str(run_config.image_workers),
+        "max_requests_per_sec": str(run_config.max_requests_per_sec),
+        "max_burst": str(run_config.max_burst),
+        "backoff_base_sec": str(run_config.backoff_base_sec),
+        "backoff_max_sec": str(run_config.backoff_max_sec),
+        "db_batch_size": str(run_config.db_batch_size),
+        "db_flush_interval_ms": str(run_config.db_flush_interval_ms),
+        "continue_on_image_failure": run_config.continue_on_image_failure,
         "stop_after_consecutive_page_failures": str(
             run_config.stop_after_consecutive_page_failures
         ),
@@ -77,6 +95,35 @@ def build_run_config_from_form(payload: Mapping[str, object]) -> RunConfig:
     raw["image_retries"] = _required_int(payload, "image_retries", "image_retries")
     raw["page_retries"] = _required_int(payload, "page_retries", "page_retries")
     raw["request_delay_sec"] = _required_float(payload, "request_delay_sec", "request_delay_sec")
+    raw["page_workers"] = _required_int(payload, "page_workers", "page_workers")
+    raw["image_workers"] = _required_int(payload, "image_workers", "image_workers")
+    raw["max_requests_per_sec"] = _required_float(
+        payload,
+        "max_requests_per_sec",
+        "max_requests_per_sec",
+    )
+    raw["max_burst"] = _required_int(payload, "max_burst", "max_burst")
+    raw["backoff_base_sec"] = _required_float(
+        payload,
+        "backoff_base_sec",
+        "backoff_base_sec",
+    )
+    raw["backoff_max_sec"] = _required_float(
+        payload,
+        "backoff_max_sec",
+        "backoff_max_sec",
+    )
+    raw["db_batch_size"] = _required_int(payload, "db_batch_size", "db_batch_size")
+    raw["db_flush_interval_ms"] = _required_int(
+        payload,
+        "db_flush_interval_ms",
+        "db_flush_interval_ms",
+    )
+    raw["continue_on_image_failure"] = _bool_or_default(
+        payload,
+        "continue_on_image_failure",
+        bool(FORM_DEFAULTS["continue_on_image_failure"]),
+    )
     raw["stop_after_consecutive_page_failures"] = _required_int(
         payload,
         "stop_after_consecutive_page_failures",
@@ -216,6 +263,30 @@ try:  # pragma: no cover - UI class is covered by manual interaction
             yield Input(value=str(defaults["page_retries"]), id="page_retries")
             yield Label("请求间隔秒 request_delay_sec")
             yield Input(value=str(defaults["request_delay_sec"]), id="request_delay_sec")
+            yield Label("页面并发 page_workers")
+            yield Input(value=str(defaults["page_workers"]), id="page_workers")
+            yield Label("图片并发 image_workers")
+            yield Input(value=str(defaults["image_workers"]), id="image_workers")
+            yield Label("限速 req/s max_requests_per_sec")
+            yield Input(value=str(defaults["max_requests_per_sec"]), id="max_requests_per_sec")
+            yield Label("限速突发 max_burst")
+            yield Input(value=str(defaults["max_burst"]), id="max_burst")
+            yield Label("退避基线秒 backoff_base_sec")
+            yield Input(value=str(defaults["backoff_base_sec"]), id="backoff_base_sec")
+            yield Label("退避上限秒 backoff_max_sec")
+            yield Input(value=str(defaults["backoff_max_sec"]), id="backoff_max_sec")
+            yield Label("数据库批量大小 db_batch_size")
+            yield Input(value=str(defaults["db_batch_size"]), id="db_batch_size")
+            yield Label("数据库刷盘间隔ms db_flush_interval_ms")
+            yield Input(
+                value=str(defaults["db_flush_interval_ms"]),
+                id="db_flush_interval_ms",
+            )
+            yield Checkbox(
+                "单图失败继续 continue_on_image_failure",
+                value=bool(defaults["continue_on_image_failure"]),
+                id="continue_on_image_failure",
+            )
             yield Label("连续失败停止阈值 stop_after_consecutive_page_failures")
             yield Input(
                 value=str(defaults["stop_after_consecutive_page_failures"]),
@@ -263,6 +334,18 @@ try:  # pragma: no cover - UI class is covered by manual interaction
                 "image_retries": self.query_one("#image_retries", Input).value,
                 "page_retries": self.query_one("#page_retries", Input).value,
                 "request_delay_sec": self.query_one("#request_delay_sec", Input).value,
+                "page_workers": self.query_one("#page_workers", Input).value,
+                "image_workers": self.query_one("#image_workers", Input).value,
+                "max_requests_per_sec": self.query_one("#max_requests_per_sec", Input).value,
+                "max_burst": self.query_one("#max_burst", Input).value,
+                "backoff_base_sec": self.query_one("#backoff_base_sec", Input).value,
+                "backoff_max_sec": self.query_one("#backoff_max_sec", Input).value,
+                "db_batch_size": self.query_one("#db_batch_size", Input).value,
+                "db_flush_interval_ms": self.query_one("#db_flush_interval_ms", Input).value,
+                "continue_on_image_failure": self.query_one(
+                    "#continue_on_image_failure",
+                    Checkbox,
+                ).value,
                 "stop_after_consecutive_page_failures": self.query_one(
                     "#stop_after_consecutive_page_failures",
                     Input,
@@ -310,6 +393,34 @@ try:  # pragma: no cover - UI class is covered by manual interaction
             )
             self.query_one("#request_delay_sec", Input).value = str(
                 payload.get("request_delay_sec", FORM_DEFAULTS["request_delay_sec"])
+            )
+            self.query_one("#page_workers", Input).value = str(
+                payload.get("page_workers", FORM_DEFAULTS["page_workers"])
+            )
+            self.query_one("#image_workers", Input).value = str(
+                payload.get("image_workers", FORM_DEFAULTS["image_workers"])
+            )
+            self.query_one("#max_requests_per_sec", Input).value = str(
+                payload.get("max_requests_per_sec", FORM_DEFAULTS["max_requests_per_sec"])
+            )
+            self.query_one("#max_burst", Input).value = str(
+                payload.get("max_burst", FORM_DEFAULTS["max_burst"])
+            )
+            self.query_one("#backoff_base_sec", Input).value = str(
+                payload.get("backoff_base_sec", FORM_DEFAULTS["backoff_base_sec"])
+            )
+            self.query_one("#backoff_max_sec", Input).value = str(
+                payload.get("backoff_max_sec", FORM_DEFAULTS["backoff_max_sec"])
+            )
+            self.query_one("#db_batch_size", Input).value = str(
+                payload.get("db_batch_size", FORM_DEFAULTS["db_batch_size"])
+            )
+            self.query_one("#db_flush_interval_ms", Input).value = str(
+                payload.get("db_flush_interval_ms", FORM_DEFAULTS["db_flush_interval_ms"])
+            )
+            self.query_one("#continue_on_image_failure", Checkbox).value = _coerce_bool(
+                payload.get("continue_on_image_failure"),
+                bool(FORM_DEFAULTS["continue_on_image_failure"]),
             )
             self.query_one("#stop_after_consecutive_page_failures", Input).value = str(
                 payload.get(

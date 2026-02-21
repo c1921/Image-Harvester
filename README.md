@@ -98,11 +98,20 @@ python -m image_harvester
 | `state_db` | `data/state.sqlite3` | SQLite 状态库路径。 |
 | `engine` | `requests` | 页面抓取引擎：`requests` 或 `playwright`。 |
 | `resume` | `true` | 是否断点续跑。`false` 会重置同 `job_id` 历史状态。 |
-| `page_timeout_sec` | `20.0` | 页面请求超时秒数。 |
-| `image_timeout_sec` | `30.0` | 图片请求超时秒数。 |
-| `image_retries` | `3` | 单张图片失败重试次数。 |
-| `page_retries` | `2` | 页面抓取失败重试次数。 |
-| `request_delay_sec` | `0.2` | 请求间隔秒数。 |
+| `page_timeout_sec` | `12.0` | 页面请求超时秒数。 |
+| `image_timeout_sec` | `18.0` | 图片请求超时秒数。 |
+| `image_retries` | `2` | 单张图片失败重试次数。 |
+| `page_retries` | `1` | 页面抓取失败重试次数。 |
+| `request_delay_sec` | `0.0` | 基础请求间隔秒数。 |
+| `page_workers` | `4` | 页面处理并发数（仅在有限页范围时启用并行调度）。 |
+| `image_workers` | `48` | 图片下载并发数。 |
+| `max_requests_per_sec` | `80.0` | 全局限速（请求/秒）。 |
+| `max_burst` | `120` | 限速器突发容量。 |
+| `backoff_base_sec` | `0.5` | 限流/错误退避基线秒数。 |
+| `backoff_max_sec` | `8.0` | 退避最大秒数。 |
+| `db_batch_size` | `300` | SQLite 批量写入条数阈值。 |
+| `db_flush_interval_ms` | `200` | SQLite 批量写入定时刷盘间隔（毫秒）。 |
+| `continue_on_image_failure` | `true` | 单图失败后是否继续下载本页剩余图片。 |
 | `stop_after_consecutive_page_failures` | `5` | 当 `end_num=None` 时，连续页面失败达到阈值即停止。 |
 | `playwright_fallback` | `false` | `engine=requests` 且解析到 0 图时，尝试 Playwright 回退抓取。 |
 | `sequence_count_selector` | `#tishi p span` | 页面“图集上限”提取选择器。 |
@@ -114,6 +123,7 @@ python -m image_harvester
 - 序号种子要求 URL 路径匹配 `.../<数字>.<后缀>`，例如 `001.jpg`。
 - 页面上限缺失时会标记该页 `failed_fetch`（并记录事件 `sequence_upper_bound_missing`）。
 - 若在达到上限前出现下载失败，该页会标记为 `failed_fetch`（事件 `sequence_incomplete_failed`）。
+- 当 `continue_on_image_failure=true` 时，会继续尝试本页其它图片并在页末汇总状态。
 - 当 `end_num=None` 时，页面状态为 `failed_fetch` 或 `no_images` 都会计入“连续失败”。
 - 目录命名：
   - 页面目录固定为 6 位页码（如 `000001`）。
@@ -207,4 +217,4 @@ pip install -e ".[dev]"
 ## 注意事项
 
 - 请仅采集你有权访问和下载的内容，并遵守目标站点的服务条款与法律法规。
-- 若目标站点反爬严格，可适当提高 `request_delay_sec`、调整超时与重试，或启用 Playwright。
+- 若目标站点反爬严格，可适当降低 `image_workers`、`max_requests_per_sec`，并提高 `backoff_base_sec`，必要时启用 Playwright。
